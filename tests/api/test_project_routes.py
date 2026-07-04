@@ -746,7 +746,48 @@ def test_stage_control_supported_stage_returns_current_milestone_error(
 
     response = client.post(
         f"/api/v1/projects/{seeded.project_id}/stages/directions/{action}",
+        json={
+            "source_version_id": seeded.directions_version_id,
+            "reason": "try another option",
+        },
     )
 
     assert response.status_code == 409
     assert response.json() == {"detail": expected_detail}
+
+
+def test_stage_control_missing_source_version_returns_404(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/redo",
+        json={
+            "source_version_id": str(uuid4()),
+            "reason": "version disappeared",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Stage version not found"}
+
+
+def test_stage_control_mismatched_source_version_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/skip",
+        json={
+            "source_version_id": logo_version_id,
+            "reason": "wrong stage",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Stage version does not belong to requested stage",
+    }

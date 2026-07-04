@@ -53,7 +53,15 @@ class ProjectNotFoundError(ProjectStageControlError):
     pass
 
 
+class StageControlNotFoundError(ProjectStageControlError):
+    pass
+
+
 class InvalidStageKeyError(ProjectStageControlError):
+    pass
+
+
+class StageControlConflictError(ProjectStageControlError):
     pass
 
 
@@ -256,6 +264,8 @@ async def request_stage_control(
     workspace_id: str,
     stage_key: str,
     action: Literal["REDO", "SKIP"],
+    source_version_id: str | None = None,
+    reason: str | None = None,
 ) -> StageControlResult:
     stage = normalize_stage_key(stage_key)
     if stage not in KNOWN_PROJECT_STAGES:
@@ -266,6 +276,13 @@ async def request_stage_control(
     )
     if found_project_id is None:
         raise ProjectNotFoundError("Project not found")
+
+    if source_version_id is not None:
+        source_version = await session.get(StageVersion, source_version_id)
+        if source_version is None or source_version.project_id != project_id:
+            raise StageControlNotFoundError("Stage version not found")
+        if source_version.stage != stage:
+            raise StageControlConflictError("Stage version does not belong to requested stage")
 
     raise UnsupportedStageControlError(
         f"{action} is not supported by this worker milestone for {stage}"

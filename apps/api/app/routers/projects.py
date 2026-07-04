@@ -13,6 +13,8 @@ from backend.application.projects import (
     CreateProjectCommand,
     InvalidStageKeyError,
     ProjectNotFoundError,
+    StageControlConflictError,
+    StageControlNotFoundError,
     UnsupportedStageControlError,
     create_project,
     get_project,
@@ -109,6 +111,13 @@ class StageControlResponse(BaseModel):
     stage: str
     action: Literal["REDO", "SKIP"]
     status: str
+
+
+class StageControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_version_id: UUID | None = None
+    reason: str | None = Field(default=None, max_length=500)
 
 
 class ProjectResponse(BaseModel):
@@ -339,12 +348,14 @@ async def redo_stage_route(
     project_id: str,
     stage_key: str,
     session: SessionDependency,
+    payload: StageControlRequest | None = None,
 ) -> StageControlResponse:
     return await _request_stage_control_route(
         project_id=project_id,
         stage_key=stage_key,
         action="REDO",
         session=session,
+        payload=payload,
     )
 
 
@@ -357,12 +368,14 @@ async def skip_stage_route(
     project_id: str,
     stage_key: str,
     session: SessionDependency,
+    payload: StageControlRequest | None = None,
 ) -> StageControlResponse:
     return await _request_stage_control_route(
         project_id=project_id,
         stage_key=stage_key,
         action="SKIP",
         session=session,
+        payload=payload,
     )
 
 
@@ -372,6 +385,7 @@ async def _request_stage_control_route(
     stage_key: str,
     action: Literal["REDO", "SKIP"],
     session: AsyncSession,
+    payload: StageControlRequest | None,
 ) -> StageControlResponse:
     try:
         result = await request_stage_control(
@@ -380,11 +394,17 @@ async def _request_stage_control_route(
             workspace_id=get_settings().default_workspace_id,
             stage_key=stage_key,
             action=action,
+            source_version_id=str(payload.source_version_id)
+            if payload and payload.source_version_id
+            else None,
+            reason=payload.reason if payload else None,
         )
-    except ProjectNotFoundError as error:
+    except (ProjectNotFoundError, StageControlNotFoundError) as error:
         raise HTTPException(status_code=404, detail=str(error)) from error
     except InvalidStageKeyError as error:
         raise HTTPException(status_code=422, detail=str(error)) from error
+    except StageControlConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
     except UnsupportedStageControlError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 

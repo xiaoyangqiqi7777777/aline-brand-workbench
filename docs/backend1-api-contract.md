@@ -232,10 +232,27 @@ HTTP 状态码为 `422`。
 
 这两个接口当前只固化契约和错误语义，尚不执行真实状态转换。
 
+请求体可省略，也可以传：
+
+```json
+{
+  "source_version_id": "stage-version-uuid",
+  "reason": "try another option"
+}
+```
+
+当前行为：
+
+- 校验 project / workspace / stage。
+- 如果传入 `source_version_id`，会校验该版本存在、属于当前项目、且阶段与路径 `stage_key` 一致。
+- 校验通过后仍返回当前 milestone 未支持的 `409`，不创建 StageRun，不派发 worker。
+
 失败：
 
 - `404`：项目不存在或不属于当前 workspace。
+- `404`：传入的 `source_version_id` 不存在或不属于当前项目。
 - `422`：stage key 非法。
+- `409`：传入的 `source_version_id` 阶段与路径阶段不一致。
 - `409`：当前 worker milestone 暂不支持该 stage/action。
 
 ## Legacy StageRun Entrypoints
