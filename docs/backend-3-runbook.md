@@ -108,10 +108,12 @@ Object key helpers are exported from `backend.infrastructure.storage`:
 - `build_artifact_object_key(project_id, stage, artifact_id, filename)`
 - `build_prefixed_artifact_object_key(prefix, artifact_id, filename)`
 - `build_temporary_artifact_prefix(project_id, scope=None)`
+- `create_asset_url_map(storage, references, expires_in_seconds=None)`
+- `create_presigned_url_map(storage, references, expires_in_seconds=None)`
 
 Current Frontend 2 branch (`qianduan2`) expects result payloads to carry `preview_asset_id`
 and a separate `assetUrls` map keyed by artifact ID. Backend 1 should resolve those artifact IDs
-from the database and call `create_download_url()` before returning UI-facing result data.
+from the database and call `create_asset_url_map()` before returning UI-facing result data.
 
 ## Export Service
 

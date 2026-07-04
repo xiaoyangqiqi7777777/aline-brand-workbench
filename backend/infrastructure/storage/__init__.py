@@ -24,6 +24,7 @@ from backend.infrastructure.storage.models import (
 )
 from backend.infrastructure.storage.s3 import S3ArtifactStorage
 from backend.infrastructure.storage.service import ArtifactStorage
+from backend.infrastructure.storage.url_map import create_asset_url_map, create_presigned_url_map
 
 __all__ = [
     "ArtifactCleanupResult",
@@ -41,6 +42,8 @@ __all__ = [
     "build_artifact_object_key",
     "build_prefixed_artifact_object_key",
     "build_temporary_artifact_prefix",
+    "create_asset_url_map",
+    "create_presigned_url_map",
     "normalize_artifact_id",
     "sanitize_storage_filename",
     "sanitize_storage_prefix",
