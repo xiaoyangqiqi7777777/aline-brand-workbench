@@ -12,6 +12,7 @@ from backend.application.projects import (
     CreateProjectCommand,
     create_project,
     get_project,
+    get_project_state,
     list_projects,
 )
 from backend.application.stage_runs import mark_outbox_published
@@ -42,6 +43,40 @@ class StageRunResponse(BaseModel):
     result_version_id: str | None
 
 
+class StageRunStateResponse(StageRunResponse):
+    parent_stage_run_id: str | None
+    workflow_thread_id: str
+    error_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class StageVersionStateResponse(BaseModel):
+    id: str
+    project_id: str
+    stage_run_id: str
+    stage: str
+    version_no: int
+    schema_version: int
+    input_refs: dict[str, Any]
+    output: dict[str, Any]
+    status: str
+    created_at: datetime
+
+
+class DecisionStateResponse(BaseModel):
+    id: str
+    project_id: str
+    stage: str
+    action: str
+    source_version_id: str
+    selected_item_id: str | None
+    resulting_stage_run_id: str
+    created_by: str
+    payload: dict[str, Any]
+    created_at: datetime
+
+
 class ProjectResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -63,6 +98,15 @@ class ProjectCreateResponse(BaseModel):
 class ProjectDetailResponse(ProjectResponse):
     brand_spec: dict[str, Any]
     stage_runs: list[StageRunResponse]
+
+
+class ProjectStateResponse(BaseModel):
+    project: ProjectResponse
+    brand_spec: dict[str, Any]
+    current_stage: str
+    stage_runs: dict[str, StageRunStateResponse]
+    versions: dict[str, StageVersionStateResponse]
+    decisions: list[DecisionStateResponse]
 
 
 @router.post("", response_model=ProjectCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -102,6 +146,63 @@ async def list_projects_route(session: SessionDependency) -> list[ProjectRespons
         workspace_id=get_settings().default_workspace_id,
     )
     return [ProjectResponse.model_validate(project) for project in projects]
+
+
+@router.get("/{project_id}/state", response_model=ProjectStateResponse)
+async def get_project_state_route(
+    project_id: str,
+    session: SessionDependency,
+) -> ProjectStateResponse:
+    state = await get_project_state(
+        session,
+        project_id=project_id,
+        workspace_id=get_settings().default_workspace_id,
+    )
+    if state is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    return ProjectStateResponse(
+        project=ProjectResponse.model_validate(state.project),
+        brand_spec={
+            **state.project.brand_spec.data_json,
+            "source_map": state.project.brand_spec.source_map_json,
+        },
+        current_stage=state.project.current_stage,
+        stage_runs={
+            run.stage: StageRunStateResponse.model_validate(run, from_attributes=True)
+            for run in state.stage_runs
+        },
+        versions={
+            version.stage: StageVersionStateResponse(
+                id=version.id,
+                project_id=version.project_id,
+                stage_run_id=version.stage_run_id,
+                stage=version.stage,
+                version_no=version.version_no,
+                schema_version=version.schema_version,
+                input_refs=version.input_refs_json,
+                output=version.output_json,
+                status=version.status,
+                created_at=version.created_at,
+            )
+            for version in state.stage_versions
+        },
+        decisions=[
+            DecisionStateResponse(
+                id=decision.id,
+                project_id=decision.project_id,
+                stage=decision.stage,
+                action=decision.action,
+                source_version_id=decision.source_version_id,
+                selected_item_id=decision.selected_item_id,
+                resulting_stage_run_id=decision.resulting_stage_run_id,
+                created_by=decision.created_by,
+                payload=decision.payload_json,
+                created_at=decision.created_at,
+            )
+            for decision in state.decisions
+        ],
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectDetailResponse)

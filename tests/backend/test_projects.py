@@ -17,6 +17,7 @@ from backend.application.projects import (
     CreateProjectCommand,
     create_project,
     get_project,
+    get_project_state,
     list_projects,
 )
 from backend.application.stage_runs import (
@@ -442,3 +443,21 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
         "decision_id": decision.id,
     }
     assert project.current_stage == "LOGO"
+
+    state = await get_project_state(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+    )
+
+    assert state is not None
+    assert state.project.id == project.id
+    assert state.project.current_stage == "LOGO"
+    assert state.project.brand_spec.data_json["industry"] == "茶饮"
+    assert {run.stage for run in state.stage_runs} == {"INTAKE", "DIRECTIONS", "LOGO"}
+    assert {version.stage for version in state.stage_versions} == {
+        "INTAKE",
+        "DIRECTIONS",
+        "LOGO",
+    }
+    assert [item.selected_item_id for item in state.decisions] == [selected_id]

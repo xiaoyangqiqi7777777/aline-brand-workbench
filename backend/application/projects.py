@@ -11,9 +11,11 @@ from sqlalchemy.orm import selectinload
 from backend.agents.schemas.brand_spec import BrandSpec, SourceRecord, SourceType
 from backend.infrastructure.database.models import (
     BrandSpecRecord,
+    Decision,
     OutboxEvent,
     Project,
     StageRun,
+    StageVersion,
 )
 
 
@@ -25,6 +27,14 @@ class CreateProjectCommand:
     requirement_text: str | None
     structured_fields: dict[str, Any]
     reference_artifact_ids: list[str]
+
+
+@dataclass(frozen=True)
+class ProjectState:
+    project: Project
+    stage_runs: list[StageRun]
+    stage_versions: list[StageVersion]
+    decisions: list[Decision]
 
 
 async def create_project(
@@ -122,3 +132,66 @@ async def get_project(
         .options(selectinload(Project.brand_spec), selectinload(Project.stage_runs))
         .where(Project.id == project_id, Project.workspace_id == workspace_id)
     )
+
+
+async def get_project_state(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    workspace_id: str,
+) -> ProjectState | None:
+    project = await session.scalar(
+        select(Project)
+        .options(selectinload(Project.brand_spec))
+        .where(Project.id == project_id, Project.workspace_id == workspace_id)
+    )
+    if project is None:
+        return None
+
+    stage_runs = await _latest_stage_runs(session, project_id=project_id)
+    stage_versions = await _latest_stage_versions(session, project_id=project_id)
+    decisions = list(
+        await session.scalars(
+            select(Decision)
+            .where(Decision.project_id == project_id)
+            .order_by(Decision.created_at.asc())
+        )
+    )
+    return ProjectState(
+        project=project,
+        stage_runs=stage_runs,
+        stage_versions=stage_versions,
+        decisions=decisions,
+    )
+
+
+async def _latest_stage_runs(
+    session: AsyncSession,
+    *,
+    project_id: str,
+) -> list[StageRun]:
+    runs = await session.scalars(
+        select(StageRun)
+        .where(StageRun.project_id == project_id)
+        .order_by(StageRun.stage.asc(), StageRun.updated_at.desc(), StageRun.created_at.desc())
+    )
+    latest_by_stage: dict[str, StageRun] = {}
+    for run in runs:
+        latest_by_stage.setdefault(run.stage, run)
+    return list(latest_by_stage.values())
+
+
+async def _latest_stage_versions(
+    session: AsyncSession,
+    *,
+    project_id: str,
+) -> list[StageVersion]:
+    versions = await session.scalars(
+        select(StageVersion)
+        .where(StageVersion.project_id == project_id)
+        .order_by(StageVersion.stage.asc(), StageVersion.version_no.desc())
+    )
+    latest_by_stage: dict[str, StageVersion] = {}
+    for version in versions:
+        latest_by_stage.setdefault(version.stage, version)
+    return list(latest_by_stage.values())
