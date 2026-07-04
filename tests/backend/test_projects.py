@@ -19,6 +19,7 @@ from backend.application.projects import (
     get_project,
     get_project_state,
     list_projects,
+    list_stage_versions,
 )
 from backend.application.stage_runs import (
     create_direction_selection_run,
@@ -461,3 +462,26 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
         "LOGO",
     }
     assert [item.selected_item_id for item in state.decisions] == [selected_id]
+
+    direction_versions = await list_stage_versions(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        stage_key="directions",
+    )
+    logo_versions = await list_stage_versions(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        stage_key="logo",
+    )
+    hidden_versions = await list_stage_versions(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-two",
+        stage_key="directions",
+    )
+
+    assert [item.id for item in direction_versions] == [directions_version.id]
+    assert [item.id for item in logo_versions] == [logo_version.id]
+    assert hidden_versions is None

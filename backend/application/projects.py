@@ -195,3 +195,31 @@ async def _latest_stage_versions(
     for version in versions:
         latest_by_stage.setdefault(version.stage, version)
     return list(latest_by_stage.values())
+
+
+async def list_stage_versions(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    workspace_id: str,
+    stage_key: str,
+) -> list[StageVersion] | None:
+    found_project_id = await session.scalar(
+        select(Project.id).where(Project.id == project_id, Project.workspace_id == workspace_id)
+    )
+    if found_project_id is None:
+        return None
+
+    versions = await session.scalars(
+        select(StageVersion)
+        .where(
+            StageVersion.project_id == project_id,
+            StageVersion.stage == normalize_stage_key(stage_key),
+        )
+        .order_by(StageVersion.version_no.desc())
+    )
+    return list(versions)
+
+
+def normalize_stage_key(stage_key: str) -> str:
+    return stage_key.strip().upper().replace("-", "_")

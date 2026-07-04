@@ -14,6 +14,7 @@ from backend.application.projects import (
     get_project,
     get_project_state,
     list_projects,
+    list_stage_versions,
 )
 from backend.application.stage_runs import mark_outbox_published
 from backend.infrastructure.database.session import get_db_session
@@ -203,6 +204,40 @@ async def get_project_state_route(
             for decision in state.decisions
         ],
     )
+
+
+@router.get(
+    "/{project_id}/stages/{stage_key}/versions",
+    response_model=list[StageVersionStateResponse],
+)
+async def list_stage_versions_route(
+    project_id: str,
+    stage_key: str,
+    session: SessionDependency,
+) -> list[StageVersionStateResponse]:
+    versions = await list_stage_versions(
+        session,
+        project_id=project_id,
+        workspace_id=get_settings().default_workspace_id,
+        stage_key=stage_key,
+    )
+    if versions is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    return [
+        StageVersionStateResponse(
+            id=version.id,
+            project_id=version.project_id,
+            stage_run_id=version.stage_run_id,
+            stage=version.stage,
+            version_no=version.version_no,
+            schema_version=version.schema_version,
+            input_refs=version.input_refs_json,
+            output=version.output_json,
+            status=version.status,
+            created_at=version.created_at,
+        )
+        for version in versions
+    ]
 
 
 @router.get("/{project_id}", response_model=ProjectDetailResponse)
