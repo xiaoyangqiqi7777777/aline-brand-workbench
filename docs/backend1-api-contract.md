@@ -224,6 +224,32 @@ HTTP 状态码为 `422`。
 
 旧入口，用于提交 Intake 补问答案并排队 `DIRECTIONS` StageRun。前端 1 仍可使用。
 
+请求体：
+
+```json
+{
+  "answers": [
+    {
+      "field_path": "industry",
+      "value": "茶饮"
+    }
+  ]
+}
+```
+
+成功：`202`
+
+返回新建或已存在的 `DIRECTIONS` StageRun。
+
+幂等规则：
+
+- 同一个 Intake StageRun 和完全相同的 answers 重复提交，返回原 `DIRECTIONS` StageRun，不重复派发 worker。
+
+错误语义：
+
+- `404`：StageRun 不存在或不属于当前 workspace。
+- `409`：StageRun 不是已成功的 `INTAKE`，或 Intake 没有可 resume 的结果。
+
 ### POST `/api/v1/stage-runs/{stage_run_id}/direction-selection`
 
 旧入口，用于选择方向并排队 `LOGO` StageRun。建议新联调优先使用项目级：
