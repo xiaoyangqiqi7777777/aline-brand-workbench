@@ -19,6 +19,13 @@ from backend.infrastructure.database.session import get_db_session
 
 
 @dataclass(frozen=True)
+class SeededIntakeProject:
+    project_id: str
+    intake_run_id: str
+    intake_version_id: str
+
+
+@dataclass(frozen=True)
 class SeededDirectionsProject:
     project_id: str
     directions_run_id: str
@@ -143,6 +150,61 @@ async def seed_logo_version(
         logo_run.result_version_id = logo_version.id
         await session.commit()
         return logo_version.id
+
+
+async def seed_succeeded_intake_project(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> SeededIntakeProject:
+    async with session_factory() as session:
+        project, intake_run, _ = await create_project(
+            session,
+            CreateProjectCommand(
+                workspace_id="local-workspace",
+                actor_id="local-developer",
+                name="Intake API 契约测试品牌",
+                requirement_text=None,
+                structured_fields={},
+                reference_artifact_ids=[],
+            ),
+        )
+        intake_run.status = "SUCCEEDED"
+        intake_version = StageVersion(
+            project_id=project.id,
+            stage_run_id=intake_run.id,
+            stage="INTAKE",
+            version_no=1,
+            schema_version=1,
+            input_refs_json={},
+            output_json={
+                "schema_version": 1,
+                "ready": False,
+                "questions": [
+                    {
+                        "id": "q-industry",
+                        "field_path": "industry",
+                        "prompt": "请补充行业。",
+                        "reason": "用于生成品牌方向。",
+                        "required": True,
+                        "answer_type": "TEXT",
+                        "options": [],
+                    }
+                ],
+                "brand_spec_patch": {},
+                "suggestions": [],
+                "conflicts": [],
+            },
+            status="GENERATED",
+        )
+        session.add(intake_version)
+        await session.flush()
+        intake_run.result_version_id = intake_version.id
+        await session.commit()
+
+        return SeededIntakeProject(
+            project_id=project.id,
+            intake_run_id=intake_run.id,
+            intake_version_id=intake_version.id,
+        )
 
 
 def build_direction_output(direction_ids: list[str]) -> dict[str, object]:
@@ -423,6 +485,76 @@ def test_stage_decision_exposes_stale_downstream_versions(
     assert logo_versions_response.status_code == 200
     assert logo_versions_payload[0]["id"] == stale_logo_version_id
     assert logo_versions_payload[0]["status"] == "STALE"
+
+
+def test_intake_answers_dispatches_directions_run(api_client, monkeypatch) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_succeeded_intake_project(session_factory))
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    response = client.post(
+        f"/api/v1/stage-runs/{seeded.intake_run_id}/intake-answers",
+        json={
+            "answers": [
+                {
+                    "field_path": "industry",
+                    "value": "茶饮",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["stage"] == "DIRECTIONS"
+    assert payload["parent_stage_run_id"] == seeded.intake_run_id
+    assert dispatched_stage_run_ids == [payload["id"]]
+
+
+def test_intake_answers_missing_stage_run_returns_404(api_client) -> None:
+    client, _ = api_client
+
+    response = client.post(
+        f"/api/v1/stage-runs/{uuid4()}/intake-answers",
+        json={
+            "answers": [
+                {
+                    "field_path": "industry",
+                    "value": "茶饮",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Stage run not found"}
+
+
+def test_intake_answers_conflicting_stage_run_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(
+        f"/api/v1/stage-runs/{seeded.directions_run_id}/intake-answers",
+        json={
+            "answers": [
+                {
+                    "field_path": "industry",
+                    "value": "茶饮",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Only a succeeded Intake run can accept answers"}
 
 
 def test_legacy_direction_selection_dispatches_logo_run(api_client, monkeypatch) -> None:

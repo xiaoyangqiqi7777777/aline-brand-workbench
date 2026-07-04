@@ -48,6 +48,18 @@ class StageDecisionConflictError(StageDecisionError):
     pass
 
 
+class StageResumeError(ValueError):
+    pass
+
+
+class StageResumeNotFoundError(StageResumeError):
+    pass
+
+
+class StageResumeConflictError(StageResumeError):
+    pass
+
+
 async def create_stage_decision(
     session: AsyncSession,
     *,
@@ -236,11 +248,11 @@ async def create_intake_resume_run(
         .with_for_update()
     )
     if source_run is None:
-        raise ValueError("Stage run not found")
+        raise StageResumeNotFoundError("Stage run not found")
     if source_run.stage != "INTAKE" or source_run.status != "SUCCEEDED":
-        raise ValueError("Only a succeeded Intake run can accept answers")
+        raise StageResumeConflictError("Only a succeeded Intake run can accept answers")
     if source_run.result_version_id is None:
-        raise ValueError("Intake run has no result to resume")
+        raise StageResumeConflictError("Intake run has no result to resume")
 
     payload_json = resume_payload.model_dump(mode="json")
     digest = hashlib.sha256(
