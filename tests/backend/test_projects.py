@@ -22,8 +22,8 @@ from backend.application.projects import (
     list_stage_versions,
 )
 from backend.application.stage_runs import (
-    create_direction_selection_run,
     create_intake_resume_run,
+    create_stage_decision,
     execute_stage_run,
     get_stage_run,
     mark_outbox_published,
@@ -380,21 +380,23 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
     direction_output = DirectionOutput.model_validate(directions_version.output_json)
     selected_id = direction_output.directions[0].id
 
-    logo_run, decision, event = await create_direction_selection_run(
+    logo_run, decision, event = await create_stage_decision(
         session,
-        source_stage_run_id=directions_run.id,
+        project_id=project.id,
         workspace_id="workspace-one",
         actor_id="developer-two",
+        stage_key="directions",
         version_id=directions_version.id,
-        direction_id=selected_id,
+        selected_item_id=selected_id,
     )
-    repeated_run, repeated_decision, repeated_event = await create_direction_selection_run(
+    repeated_run, repeated_decision, repeated_event = await create_stage_decision(
         session,
-        source_stage_run_id=directions_run.id,
+        project_id=project.id,
         workspace_id="workspace-one",
         actor_id="developer-two",
+        stage_key="directions",
         version_id=directions_version.id,
-        direction_id=selected_id,
+        selected_item_id=selected_id,
     )
 
     assert event is not None
@@ -408,13 +410,25 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
     assert await session.scalar(select(func.count()).select_from(Decision)) == 1
 
     with pytest.raises(ValueError, match="already has another selection"):
-        await create_direction_selection_run(
+        await create_stage_decision(
             session,
-            source_stage_run_id=directions_run.id,
+            project_id=project.id,
             workspace_id="workspace-one",
             actor_id="developer-two",
+            stage_key="directions",
             version_id=directions_version.id,
-            direction_id=direction_output.directions[1].id,
+            selected_item_id=direction_output.directions[1].id,
+        )
+
+    with pytest.raises(ValueError, match="Stage version not found"):
+        await create_stage_decision(
+            session,
+            project_id=project.id,
+            workspace_id="workspace-two",
+            actor_id="developer-two",
+            stage_key="directions",
+            version_id=directions_version.id,
+            selected_item_id=selected_id,
         )
 
     logo_recorder = SqlAlchemyInvocationRecorder(session, stage_run_id=logo_run.id)

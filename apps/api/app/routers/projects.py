@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -16,7 +17,7 @@ from backend.application.projects import (
     list_projects,
     list_stage_versions,
 )
-from backend.application.stage_runs import mark_outbox_published
+from backend.application.stage_runs import create_stage_decision, mark_outbox_published
 from backend.infrastructure.database.session import get_db_session
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -76,6 +77,19 @@ class DecisionStateResponse(BaseModel):
     created_by: str
     payload: dict[str, Any]
     created_at: datetime
+
+
+class StageDecisionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    version_id: UUID
+    selected_item_id: str = Field(min_length=1, max_length=120)
+    action: Literal["SELECT_VERSION"] = "SELECT_VERSION"
+
+
+class StageDecisionResponse(BaseModel):
+    decision: DecisionStateResponse
+    stage_run: StageRunStateResponse
 
 
 class ProjectResponse(BaseModel):
@@ -238,6 +252,55 @@ async def list_stage_versions_route(
         )
         for version in versions
     ]
+
+
+@router.post(
+    "/{project_id}/stages/{stage_key}/decisions",
+    response_model=StageDecisionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_stage_decision_route(
+    project_id: str,
+    stage_key: str,
+    payload: StageDecisionRequest,
+    session: SessionDependency,
+) -> StageDecisionResponse:
+    settings = get_settings()
+    try:
+        stage_run, decision, outbox_event = await create_stage_decision(
+            session,
+            project_id=project_id,
+            workspace_id=settings.default_workspace_id,
+            actor_id=settings.default_actor_id,
+            stage_key=stage_key,
+            version_id=str(payload.version_id),
+            selected_item_id=payload.selected_item_id,
+            action=payload.action,
+        )
+    except ValueError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    if outbox_event is not None:
+        from apps.api.app.tasks import execute_agent_stage
+
+        execute_agent_stage.delay(stage_run.id)
+        await mark_outbox_published(session, event_id=outbox_event.id)
+
+    return StageDecisionResponse(
+        decision=DecisionStateResponse(
+            id=decision.id,
+            project_id=decision.project_id,
+            stage=decision.stage,
+            action=decision.action,
+            source_version_id=decision.source_version_id,
+            selected_item_id=decision.selected_item_id,
+            resulting_stage_run_id=decision.resulting_stage_run_id,
+            created_by=decision.created_by,
+            payload=decision.payload_json,
+            created_at=decision.created_at,
+        ),
+        stage_run=StageRunStateResponse.model_validate(stage_run, from_attributes=True),
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectDetailResponse)

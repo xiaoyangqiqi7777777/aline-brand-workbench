@@ -23,6 +23,47 @@ from backend.infrastructure.database.models import (
 )
 
 
+async def create_stage_decision(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    workspace_id: str,
+    actor_id: str,
+    stage_key: str,
+    version_id: str,
+    selected_item_id: str,
+    action: str = "SELECT_VERSION",
+) -> tuple[StageRun, Decision, OutboxEvent | None]:
+    stage = _normalize_stage_key(stage_key)
+    if action != "SELECT_VERSION":
+        raise ValueError("Only SELECT_VERSION decisions are supported")
+
+    source_version = await session.scalar(
+        select(StageVersion)
+        .join(Project, Project.id == StageVersion.project_id)
+        .where(
+            StageVersion.id == version_id,
+            StageVersion.project_id == project_id,
+            StageVersion.stage == stage,
+            Project.workspace_id == workspace_id,
+        )
+    )
+    if source_version is None:
+        raise ValueError("Stage version not found")
+
+    if stage == "DIRECTIONS":
+        return await create_direction_selection_run(
+            session,
+            source_stage_run_id=source_version.stage_run_id,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            version_id=version_id,
+            direction_id=selected_item_id,
+        )
+
+    raise ValueError(f"{stage} decisions are not supported by this worker milestone")
+
+
 async def create_direction_selection_run(
     session: AsyncSession,
     *,
@@ -324,3 +365,7 @@ async def get_stage_run(
         else None
     )
     return stage_run, version
+
+
+def _normalize_stage_key(stage_key: str) -> str:
+    return stage_key.strip().upper().replace("-", "_")
