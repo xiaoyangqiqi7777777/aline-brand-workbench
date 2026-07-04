@@ -194,6 +194,10 @@ HTTP 状态码为 `422`。
 - 创建新决策时，会将该阶段之后的已有 StageVersion 标记为 `STALE`。
 - 例如重新选择 Directions 后，旧 Logo / VI / IP / Materials / Review / Proposal 版本会变为 `STALE`。
 
+状态转换：
+
+- 首次创建新的 `LOGO` StageRun 时，`project.current_stage` 会立即推进为 `LOGO`，即使 worker 仍处于 `QUEUED`。
+
 失败：
 
 - `404`：项目不存在，或版本不存在/不属于该项目。
@@ -240,6 +244,11 @@ HTTP 状态码为 `422`。
 成功：`202`
 
 返回新建或已存在的 `DIRECTIONS` StageRun。
+
+状态转换：
+
+- 首次创建新的 `DIRECTIONS` StageRun 时，`project.current_stage` 会立即推进为 `DIRECTIONS`，即使 worker 仍处于 `QUEUED`。
+- 首次创建新的 `DIRECTIONS` StageRun 时，会将 `INTAKE` 之后的已有 StageVersion 标记为 `STALE`，包括旧 Directions / Logo / VI / IP / Materials / Review / Proposal 版本。
 
 幂等规则：
 
