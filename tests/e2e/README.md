@@ -6,10 +6,13 @@ default so normal unit-test and CI runs do not require Docker services.
 Run manually:
 
 ```sh
-cp .env.example .env
-docker compose up --build -d
-BRAND_STUDIO_RUN_E2E=1 .venv/bin/python -m pytest tests/e2e
-docker compose stop
+./scripts/run-e2e.sh
+```
+
+To keep the stack running after the test:
+
+```sh
+KEEP_STACK=1 ./scripts/run-e2e.sh
 ```
 
 Current scope:
