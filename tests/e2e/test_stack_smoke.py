@@ -21,14 +21,15 @@ _LONG_RUNNING_SERVICES = {
     "api",
     "worker",
     "web",
-    "nginx",
 }
+_PROXY_SERVICES = {"gateway", "nginx"}
 
 
 def test_compose_services_are_running_and_healthy() -> None:
-    missing, unhealthy = _wait_for_compose_health()
+    missing, missing_proxy, unhealthy = _wait_for_compose_health()
 
     assert missing == set()
+    assert missing_proxy is False
     assert unhealthy == {}
 
 
@@ -74,25 +75,29 @@ def _wait_for_compose_health(
     *,
     timeout_seconds: float = 45,
     interval_seconds: float = 1,
-) -> tuple[set[str], dict[str, dict[str, Any]]]:
+) -> tuple[set[str], bool, dict[str, dict[str, Any]]]:
     deadline = time.monotonic() + timeout_seconds
     missing: set[str] = set()
+    missing_proxy = True
     unhealthy: dict[str, dict[str, Any]] = {}
 
     while time.monotonic() < deadline:
         services = _compose_services()
         by_service = {_service_name(service): service for service in services}
         missing = _LONG_RUNNING_SERVICES - by_service.keys()
+        proxy_names = _PROXY_SERVICES & by_service.keys()
+        missing_proxy = not proxy_names
         unhealthy = {
             name: service
             for name, service in by_service.items()
-            if name in _LONG_RUNNING_SERVICES and not _is_running_and_healthy(service)
+            if name in _LONG_RUNNING_SERVICES | proxy_names
+            and not _is_running_and_healthy(service)
         }
-        if not missing and not unhealthy:
-            return missing, unhealthy
+        if not missing and not missing_proxy and not unhealthy:
+            return missing, missing_proxy, unhealthy
         time.sleep(interval_seconds)
 
-    return missing, unhealthy
+    return missing, missing_proxy, unhealthy
 
 
 def _compose_services() -> list[dict[str, Any]]:

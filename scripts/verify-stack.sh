@@ -2,7 +2,8 @@
 
 set -eu
 
-EXPECTED_SERVICES="postgres redis minio api worker web nginx"
+EXPECTED_SERVICES="postgres redis minio api worker web"
+PROXY_SERVICES="gateway nginx"
 VERIFY_TIMEOUT_SECONDS="${VERIFY_TIMEOUT_SECONDS:-60}"
 
 info() {
@@ -99,6 +100,17 @@ check_service() {
   fail "$service 服务未在 ${VERIFY_TIMEOUT_SECONDS}s 内进入 healthy/running 状态"
 }
 
+check_proxy_service() {
+  for service in $PROXY_SERVICES; do
+    if [ -n "$(docker compose ps -q "$service" 2>/dev/null || true)" ]; then
+      check_service "$service"
+      return
+    fi
+  done
+
+  fail "未找到反向代理服务，期望其中之一：$PROXY_SERVICES"
+}
+
 command -v docker >/dev/null 2>&1 || fail "Docker 未安装。"
 command -v curl >/dev/null 2>&1 || fail "curl 未安装。"
 docker info >/dev/null 2>&1 || fail "Docker 服务未运行，请先启动 Docker Desktop。"
@@ -110,6 +122,7 @@ docker compose ps
 for service in $EXPECTED_SERVICES; do
   check_service "$service"
 done
+check_proxy_service
 
 check_url "gateway" "http://127.0.0.1:${GATEWAY_PORT}/health"
 check_url "web" "http://127.0.0.1:${WEB_PORT}/api/health"
