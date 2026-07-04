@@ -109,6 +109,40 @@ async def seed_directions_project(
         )
 
 
+async def seed_logo_version(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    project_id: str,
+) -> str:
+    async with session_factory() as session:
+        logo_run = StageRun(
+            workflow_thread_id=str(uuid4()),
+            project_id=project_id,
+            stage="LOGO",
+            status="SUCCEEDED",
+            idempotency_key=f"api-test-logo:{project_id}",
+            input_json={},
+        )
+        session.add(logo_run)
+        await session.flush()
+
+        logo_version = StageVersion(
+            project_id=project_id,
+            stage_run_id=logo_run.id,
+            stage="LOGO",
+            version_no=1,
+            schema_version=1,
+            input_refs_json={},
+            output_json={},
+            status="GENERATED",
+        )
+        session.add(logo_version)
+        await session.flush()
+        logo_run.result_version_id = logo_version.id
+        await session.commit()
+        return logo_version.id
+
+
 def build_direction_output(direction_ids: list[str]) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -270,6 +304,74 @@ def test_create_stage_decision_conflicting_selection_returns_409(
     assert response.status_code == 409
     assert response.json() == {
         "detail": "This Directions version already has another selection",
+    }
+
+
+def test_create_stage_decision_missing_project_returns_404(api_client) -> None:
+    client, _ = api_client
+
+    response = client.post(
+        f"/api/v1/projects/{uuid4()}/stages/directions/decisions",
+        json={
+            "version_id": str(uuid4()),
+            "selected_item_id": "direction-a",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Project not found"}
+
+
+def test_create_stage_decision_missing_version_returns_404(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/decisions",
+        json={
+            "version_id": str(uuid4()),
+            "selected_item_id": "direction-a",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Stage version not found"}
+
+
+def test_create_stage_decision_invalid_stage_returns_422(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/nope/decisions",
+        json={
+            "version_id": seeded.directions_version_id,
+            "selected_item_id": "direction-a",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid stage key: nope"}
+
+
+def test_create_stage_decision_unsupported_stage_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
+        json={
+            "version_id": logo_version_id,
+            "selected_item_id": "logo-a",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "LOGO decisions are not supported by this worker milestone",
     }
 
 

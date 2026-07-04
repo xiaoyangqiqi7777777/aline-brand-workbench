@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.agents.schemas.brand_spec import BrandSpec, SourceRecord, SourceType
+from backend.application.stages import KNOWN_PROJECT_STAGES, normalize_stage_key
 from backend.infrastructure.database.models import (
     BrandSpecRecord,
     Decision,
@@ -58,20 +59,6 @@ class InvalidStageKeyError(ProjectStageControlError):
 
 class UnsupportedStageControlError(ProjectStageControlError):
     pass
-
-
-KNOWN_PROJECT_STAGES = frozenset(
-    {
-        "INTAKE",
-        "DIRECTIONS",
-        "LOGO",
-        "VI",
-        "IP",
-        "MATERIALS",
-        "REVIEW",
-        "PROPOSAL",
-    }
-)
 
 
 async def create_project(
@@ -279,7 +266,3 @@ async def request_stage_control(
     raise UnsupportedStageControlError(
         f"{action} is not supported by this worker milestone for {stage}"
     )
-
-
-def normalize_stage_key(stage_key: str) -> str:
-    return stage_key.strip().upper().replace("-", "_")

@@ -21,7 +21,14 @@ from backend.application.projects import (
     list_stage_versions,
     request_stage_control,
 )
-from backend.application.stage_runs import create_stage_decision, mark_outbox_published
+from backend.application.stage_runs import (
+    InvalidStageDecisionError,
+    StageDecisionConflictError,
+    StageDecisionNotFoundError,
+    UnsupportedStageDecisionError,
+    create_stage_decision,
+    mark_outbox_published,
+)
 from backend.infrastructure.database.session import get_db_session
 
 router = APIRouter(prefix="/projects", tags=["projects"])
@@ -288,7 +295,11 @@ async def create_stage_decision_route(
             selected_item_id=payload.selected_item_id,
             action=payload.action,
         )
-    except ValueError as error:
+    except StageDecisionNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except InvalidStageDecisionError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except (StageDecisionConflictError, UnsupportedStageDecisionError) as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
     if outbox_event is not None:

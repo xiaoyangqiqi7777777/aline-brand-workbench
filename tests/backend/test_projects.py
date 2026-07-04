@@ -420,7 +420,7 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
             selected_item_id=direction_output.directions[1].id,
         )
 
-    with pytest.raises(ValueError, match="Stage version not found"):
+    with pytest.raises(ValueError, match="Project not found"):
         await create_stage_decision(
             session,
             project_id=project.id,
