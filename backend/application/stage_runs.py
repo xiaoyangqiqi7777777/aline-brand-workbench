@@ -205,6 +205,11 @@ async def create_direction_selection_run(
         project_id=source_run.project_id,
         stage=source_run.stage,
     )
+    project = await session.get(Project, source_run.project_id)
+    if project is None:
+        raise StageDecisionNotFoundError("Project not found")
+    project.current_stage = resumed_run.stage
+    project.version += 1
     session.add_all([decision, event])
     await session.commit()
     return resumed_run, decision, event
@@ -283,6 +288,16 @@ async def create_intake_resume_run(
         topic="agent.stage_run.requested",
         payload_json={"stage_run_id": run_id},
     )
+    await mark_downstream_versions_stale(
+        session,
+        project_id=source_run.project_id,
+        stage=source_run.stage,
+    )
+    project = await session.get(Project, source_run.project_id)
+    if project is None:
+        raise StageResumeNotFoundError("Project not found")
+    project.current_stage = resumed_run.stage
+    project.version += 1
     session.add_all([resumed_run, event])
     await session.commit()
     return resumed_run, event

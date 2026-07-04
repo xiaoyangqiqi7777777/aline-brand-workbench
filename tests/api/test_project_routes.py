@@ -479,6 +479,7 @@ def test_stage_decision_exposes_stale_downstream_versions(
     state_payload = state_response.json()
     logo_versions_payload = logo_versions_response.json()
     assert state_response.status_code == 200
+    assert state_payload["current_stage"] == "LOGO"
     assert state_payload["stage_runs"]["LOGO"]["status"] == "QUEUED"
     assert state_payload["versions"]["LOGO"]["id"] == stale_logo_version_id
     assert state_payload["versions"]["LOGO"]["status"] == "STALE"

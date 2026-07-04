@@ -444,6 +444,7 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
     assert decision.source_version_id == directions_version.id
     assert decision.selected_item_id == selected_id
     assert await session.scalar(select(func.count()).select_from(Decision)) == 1
+    assert project.current_stage == "LOGO"
 
     with pytest.raises(ValueError, match="already has another selection"):
         await create_stage_decision(
@@ -612,3 +613,99 @@ async def test_new_direction_selection_marks_downstream_versions_stale(session) 
     assert old_logo_version.status == "STALE"
     assert next_logo_run.stage == "LOGO"
     assert next_logo_run.status == "QUEUED"
+    assert project.current_stage == "LOGO"
+
+
+@pytest.mark.asyncio
+async def test_intake_answers_mark_downstream_versions_stale_and_advance_stage(session) -> None:
+    project, intake_run, _ = await create_project(
+        session,
+        CreateProjectCommand(
+            workspace_id="workspace-one",
+            actor_id="developer-two",
+            name="Intake 下游过期测试品牌",
+            requirement_text=None,
+            structured_fields={},
+            reference_artifact_ids=[],
+        ),
+    )
+    intake_run.status = "SUCCEEDED"
+    old_directions_run = StageRun(
+        workflow_thread_id=intake_run.workflow_thread_id,
+        project_id=project.id,
+        stage="DIRECTIONS",
+        status="SUCCEEDED",
+        idempotency_key=f"stale-test-old-directions:{project.id}",
+        input_json={},
+    )
+    old_logo_run = StageRun(
+        workflow_thread_id=intake_run.workflow_thread_id,
+        project_id=project.id,
+        stage="LOGO",
+        status="SUCCEEDED",
+        idempotency_key=f"stale-test-old-logo:{project.id}",
+        input_json={},
+    )
+    session.add_all([old_directions_run, old_logo_run])
+    await session.flush()
+
+    intake_version = StageVersion(
+        project_id=project.id,
+        stage_run_id=intake_run.id,
+        stage="INTAKE",
+        version_no=1,
+        schema_version=1,
+        input_refs_json={},
+        output_json={},
+        status="GENERATED",
+    )
+    old_directions_version = StageVersion(
+        project_id=project.id,
+        stage_run_id=old_directions_run.id,
+        stage="DIRECTIONS",
+        version_no=1,
+        schema_version=1,
+        input_refs_json={},
+        output_json={},
+        status="GENERATED",
+    )
+    old_logo_version = StageVersion(
+        project_id=project.id,
+        stage_run_id=old_logo_run.id,
+        stage="LOGO",
+        version_no=1,
+        schema_version=1,
+        input_refs_json={},
+        output_json={},
+        status="GENERATED",
+    )
+    session.add_all([intake_version, old_directions_version, old_logo_version])
+    await session.flush()
+    intake_run.result_version_id = intake_version.id
+    old_directions_run.result_version_id = old_directions_version.id
+    old_logo_run.result_version_id = old_logo_version.id
+    project.current_stage = "LOGO"
+    await session.commit()
+
+    directions_run, event = await create_intake_resume_run(
+        session,
+        source_stage_run_id=intake_run.id,
+        workspace_id="workspace-one",
+        resume_payload=IntakeResumePayload.model_validate(
+            {
+                "answers": [
+                    {"field_path": "industry", "value": "茶饮"},
+                ]
+            }
+        ),
+    )
+
+    await session.refresh(old_directions_version)
+    await session.refresh(old_logo_version)
+
+    assert event is not None
+    assert directions_run.stage == "DIRECTIONS"
+    assert directions_run.status == "QUEUED"
+    assert old_directions_version.status == "STALE"
+    assert old_logo_version.status == "STALE"
+    assert project.current_stage == "DIRECTIONS"
