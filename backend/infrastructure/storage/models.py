@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime
+from typing import BinaryIO
 
 
 @dataclass(frozen=True, slots=True)
@@ -20,6 +21,31 @@ class ArtifactMetadata:
     content_type: str | None
     etag: str | None
     last_modified: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactUpload:
+    reference: ArtifactReference
+    body: bytes | BinaryIO
+    cache_control: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class StoredArtifact:
+    artifact_id: str
+    bucket: str
+    object_key: str
+    etag: str | None
+    version_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactCleanupResult:
+    bucket: str
+    prefix: str
+    scanned_count: int
+    deleted_count: int
+    failed_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
