@@ -113,6 +113,12 @@ async def create_stage_decision(
             direction_id=selected_item_id,
         )
 
+    if stage == "LOGO" and action == "SELECT_VERSION":
+        assert selected_item_id is not None
+        logo_output = LogoOutput.model_validate(source_version.output_json)
+        if selected_item_id not in {item.id for item in logo_output.concepts}:
+            raise StageDecisionConflictError("Selected logo does not exist in current version")
+
     raise UnsupportedStageDecisionError(
         f"{stage} {action} decisions are not supported by this worker milestone"
     )

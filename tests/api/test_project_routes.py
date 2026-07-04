@@ -143,7 +143,7 @@ async def seed_stage_version(
             version_no=1,
             schema_version=1,
             input_refs_json={},
-            output_json={},
+            output_json=build_logo_output() if stage == "LOGO" else {},
             status="GENERATED",
         )
         session.add(version)
@@ -247,6 +247,44 @@ def build_direction_output(direction_ids: list[str]) -> dict[str, object]:
                 "preview_asset_id": str(uuid4()),
             }
             for index, direction_id in enumerate(direction_ids, start=1)
+        ],
+    }
+
+
+def build_logo_output() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "concepts": [
+            {
+                "id": "logo-wordmark",
+                "name": "结构字标",
+                "rationale": "以清晰字形建立稳定识别。",
+                "symbolism": "通过字形比例表达品牌可靠感。",
+                "shape_language": "克制几何和开放留白。",
+                "color_strategy": "优先使用方向主色。",
+                "image_prompt": "modern wordmark logo",
+                "preview_asset_id": str(uuid4()),
+            },
+            {
+                "id": "logo-symbol",
+                "name": "抽象符号",
+                "rationale": "提升图标场景辨识度。",
+                "symbolism": "抽象连接形态。",
+                "shape_language": "简洁轮廓和单一重心。",
+                "color_strategy": "主色与深色高对比。",
+                "image_prompt": "modern symbol logo",
+                "preview_asset_id": str(uuid4()),
+            },
+            {
+                "id": "logo-combination",
+                "name": "组合标识",
+                "rationale": "兼顾完整表达和拆分使用。",
+                "symbolism": "文字负责名称，符号承载概念。",
+                "shape_language": "横版与竖版均可延展。",
+                "color_strategy": "主色与中性色组合。",
+                "image_prompt": "modern combination logo",
+                "preview_asset_id": str(uuid4()),
+            },
         ],
     }
 
@@ -448,13 +486,34 @@ def test_create_stage_decision_unsupported_stage_returns_409(api_client) -> None
         f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
         json={
             "version_id": logo_version_id,
-            "selected_item_id": "logo-a",
+            "selected_item_id": "logo-wordmark",
         },
     )
 
     assert response.status_code == 409
     assert response.json() == {
         "detail": "LOGO SELECT_VERSION decisions are not supported by this worker milestone",
+    }
+
+
+def test_create_stage_decision_invalid_logo_selection_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
+        json={
+            "version_id": logo_version_id,
+            "selected_item_id": "missing-logo",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Selected logo does not exist in current version",
     }
 
 

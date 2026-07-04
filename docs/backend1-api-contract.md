@@ -221,7 +221,7 @@ HTTP 状态码为 `422`。
 
 当前限制：
 
-- `logo` 的 `SELECT_VERSION` 暂返回 `409`，因为 Logo 选择进入 VI 的落库执行仍需后端 2 的 workflow milestone 对齐。
+- `logo` 的 `SELECT_VERSION` 会校验 `selected_item_id` 是否存在于该 Logo 版本；校验通过后仍暂返回 `409`，因为 Logo 选择进入 VI 的落库执行仍需后端 2 的 workflow milestone 对齐。
 - `vi` / `ip` / `materials` / `review` / `proposal` 的 `CONFIRM_VERSION` 暂返回 `409`，等待对应 worker milestone 对齐后再补执行。
 
 ## Stage Control Skeletons
