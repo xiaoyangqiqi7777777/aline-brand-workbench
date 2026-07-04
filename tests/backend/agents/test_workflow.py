@@ -732,3 +732,120 @@ def test_review_decision_resumes_after_worker_rebuild_and_generates_proposal() -
     assert len(proposal_invocations) == 1
     assert proposal_invocations[0].image_count == 0
     assert len(artifact_writer.items) == artifact_count_before_proposal
+
+
+@pytest.mark.parametrize("ip_action", ["GENERATE", "SKIP"])
+def test_proposal_confirmation_reaches_export_ready_after_worker_rebuild(
+    ip_action: str,
+) -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    suffix = ip_action.lower()
+    config = _config(f"thread-proposal-export-{suffix}")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": f"project-proposal-export-{suffix}",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-directions-{suffix}")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-logo-{suffix}")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-vi-{suffix}")),
+            "confirmed": True,
+        },
+    )
+    waiting_after_ip_choice = _resume(first_worker, config, {"action": ip_action})
+    if ip_action == "GENERATE":
+        waiting_for_materials = _resume(
+            first_worker,
+            config,
+            {
+                "version_id": str(_version("proposal-export-ip-generate")),
+                "confirmed": True,
+            },
+        )
+    else:
+        waiting_for_materials = waiting_after_ip_choice
+    assert waiting_for_materials["__interrupt__"][0].value["kind"] == "material_decision"
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-materials-{suffix}")),
+            "confirmed": True,
+        },
+    )
+    waiting_for_proposal = _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-review-{suffix}")),
+            "proceed": True,
+            "accepted_issue_ids": [],
+        },
+    )
+    assert waiting_for_proposal["__interrupt__"][0].value["kind"] == "proposal_decision"
+    ProposalOutput.model_validate(waiting_for_proposal["proposal_output"])
+    invocation_count_before_confirmation = len(invocation_recorder.records)
+    artifact_count_before_confirmation = len(artifact_writer.items)
+
+    rebuilt_worker = build()
+    completed = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-proposal-{suffix}")),
+            "confirmed": True,
+        },
+    )
+    expected_versions = {
+        "DIRECTIONS",
+        "LOGO",
+        "VI",
+        "MATERIALS",
+        "REVIEW",
+        "PROPOSAL",
+    }
+    if ip_action == "GENERATE":
+        expected_versions.add("IP")
+
+    assert completed["status"] == "EXPORT_READY"
+    assert completed["selected_version_ids"]["PROPOSAL"] == str(
+        _version(f"proposal-export-proposal-{suffix}")
+    )
+    assert set(completed["selected_version_ids"]) == expected_versions
+    assert not completed.get("__interrupt__")
+    assert len(invocation_recorder.records) == invocation_count_before_confirmation
+    assert len(artifact_writer.items) == artifact_count_before_confirmation
