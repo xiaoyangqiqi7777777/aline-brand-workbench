@@ -108,8 +108,18 @@ Object key helpers are exported from `backend.infrastructure.storage`:
 - `build_artifact_object_key(project_id, stage, artifact_id, filename)`
 - `build_prefixed_artifact_object_key(prefix, artifact_id, filename)`
 - `build_temporary_artifact_prefix(project_id, scope=None)`
+- `FileArtifactService.store_file(request)`
 - `create_asset_url_map(storage, references, expires_in_seconds=None)`
 - `create_presigned_url_map(storage, references, expires_in_seconds=None)`
+
+Current Frontend 1 branch (`feat/frontend-1-project-intake`) creates projects with
+`reference_artifact_ids`. The future `POST /files` Router should:
+
+1. Read the uploaded file bytes.
+2. Call `FileArtifactService.store_file()` with `stage="references"`.
+3. Persist the returned `artifact_id`, `bucket`, `object_key`, `filename`, `content_type`
+   as `mime_type`, `size_bytes`, and `sha256` in Backend 1's artifact table.
+4. Return the stored `artifact_id` so Frontend 1 can include it in `reference_artifact_ids`.
 
 Current Frontend 2 branch (`qianduan2`) expects result payloads to carry `preview_asset_id`
 and a separate `assetUrls` map keyed by artifact ID. Backend 1 should resolve those artifact IDs
@@ -214,6 +224,12 @@ Required artifact fields:
 - object_key
 - filename
 - content_type
+- size_bytes
+- sha256
+
+Frontend 1 currently creates projects with reference_artifact_ids. Please wire POST /files to
+FileArtifactService.store_file(), persist the returned metadata, and return artifact_id before
+project creation.
 
 Frontend 2 currently uses preview_asset_id + assetUrls. Please confirm whether Backend 1 will
 hydrate those URLs in the workbench response or expose a separate artifact URL endpoint.
