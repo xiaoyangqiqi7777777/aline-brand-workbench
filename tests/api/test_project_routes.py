@@ -377,6 +377,44 @@ def test_create_stage_decision_unsupported_stage_returns_409(api_client) -> None
     }
 
 
+def test_stage_decision_exposes_stale_downstream_versions(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    stale_logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    decision_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/decisions",
+        json={
+            "version_id": seeded.directions_version_id,
+            "selected_item_id": seeded.direction_ids[0],
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+    logo_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/versions",
+    )
+
+    assert decision_response.status_code == 202
+    state_payload = state_response.json()
+    logo_versions_payload = logo_versions_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["stage_runs"]["LOGO"]["status"] == "QUEUED"
+    assert state_payload["versions"]["LOGO"]["id"] == stale_logo_version_id
+    assert state_payload["versions"]["LOGO"]["status"] == "STALE"
+    assert logo_versions_response.status_code == 200
+    assert logo_versions_payload[0]["id"] == stale_logo_version_id
+    assert logo_versions_payload[0]["status"] == "STALE"
+
+
 def test_legacy_direction_selection_dispatches_logo_run(api_client, monkeypatch) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
