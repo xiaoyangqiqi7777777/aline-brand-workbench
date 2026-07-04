@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import NAMESPACE_URL, uuid5
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -363,3 +364,86 @@ def test_logo_selection_resumes_after_worker_rebuild_and_reaches_vi_decision() -
     assert waiting_for_vi["selected_version_ids"]["LOGO"] == str(_version("restart-logo"))
     assert vi_output.source_logo_asset_id == selected_logo.preview_asset_id
     assert sum(record.capability.value == "VI" for record in invocation_recorder.records) == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_interrupt", "expects_ip"),
+    [
+        ("GENERATE", "ip_decision", True),
+        ("SKIP", "material_decision", False),
+    ],
+)
+def test_vi_confirmation_and_ip_choice_resume_after_worker_rebuild(
+    action: str,
+    expected_interrupt: str,
+    expects_ip: bool,
+) -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config(f"thread-vi-ip-{action.lower()}")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": f"project-vi-ip-{action.lower()}",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"vi-ip-directions-{action}")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    waiting_for_vi = _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"vi-ip-logo-{action}")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    assert waiting_for_vi["__interrupt__"][0].value["kind"] == "vi_decision"
+
+    confirmation_worker = build()
+    waiting_for_ip_choice = _resume(
+        confirmation_worker,
+        config,
+        {
+            "version_id": str(_version(f"vi-ip-vi-{action}")),
+            "confirmed": True,
+        },
+    )
+    assert waiting_for_ip_choice["__interrupt__"][0].value["kind"] == "ip_choice"
+    assert waiting_for_ip_choice["selected_version_ids"]["VI"] == str(
+        _version(f"vi-ip-vi-{action}")
+    )
+
+    choice_worker = build()
+    resumed = _resume(choice_worker, config, {"action": action})
+    ip_invocations = [
+        record for record in invocation_recorder.records if record.capability.value == "IP"
+    ]
+
+    assert resumed["__interrupt__"][0].value["kind"] == expected_interrupt
+    assert resumed["ip_skipped"] is (not expects_ip)
+    assert len(ip_invocations) == (2 if expects_ip else 0)
+    assert sum(record.image_count for record in ip_invocations) == (1 if expects_ip else 0)
+    if expects_ip:
+        IPOutput.model_validate(resumed["ip_output"])
+    else:
+        assert "ip_output" not in resumed
