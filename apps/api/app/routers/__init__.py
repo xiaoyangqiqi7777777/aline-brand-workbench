@@ -1,1 +1,1 @@
-"""HTTP API routers."""
+"""HTTP route modules."""

@@ -2,12 +2,11 @@ import asyncio
 from typing import Any
 
 import boto3
+from app.settings import Settings
 from botocore.config import Config
 from redis.asyncio import Redis
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
-
-from app.settings import Settings
 
 
 async def check_dependencies(settings: Settings) -> dict[str, str]:

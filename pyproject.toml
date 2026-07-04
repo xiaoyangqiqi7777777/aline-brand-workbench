@@ -1,25 +1,31 @@
 [project]
-name = "brand-agent-studio"
+name = "aline-brand-workbench"
 version = "0.1.0"
-description = "Brand Agent Studio backend environment baseline"
-requires-python = ">=3.12,<3.13"
+description = "Shared Python runtime for Brand Agent Studio"
+requires-python = ">=3.12,<3.14"
 dependencies = [
-  "boto3>=1.35,<2",
-  "fastapi>=0.115,<1",
-  "langgraph>=0.4,<1",
-  "pydantic-settings>=2.7,<3",
-  "psycopg[binary]>=3.2,<4",
-  "redis>=5.2,<7",
-  "sqlalchemy>=2.0,<3",
-  "uvicorn[standard]>=0.34,<1",
+  "alembic>=1.16,<2",
+  "asyncpg>=0.30,<1",
+  "boto3>=1.40,<2",
+  "celery[redis]>=5.5,<6",
+  "fastapi>=0.116,<1",
+  "httpx>=0.28,<1",
+  "langgraph>=1.2,<2",
+  "langgraph-checkpoint-postgres>=3,<4",
+  "pydantic-settings>=2.10,<3",
+  "psycopg[binary,pool]>=3.2,<4",
+  "python-multipart>=0.0.20,<1",
+  "redis>=6,<7",
+  "sqlalchemy[asyncio]>=2.0,<3",
+  "uvicorn[standard]>=0.35,<1",
 ]
 
 [dependency-groups]
 dev = [
-  "httpx>=0.28,<1",
-  "pytest>=8.3,<9",
-  "pytest-asyncio>=0.25,<1",
-  "ruff>=0.11,<1",
+  "aiosqlite>=0.22,<1",
+  "pytest>=9,<10",
+  "pytest-asyncio>=1.1,<2",
+  "ruff>=0.12,<1",
 ]
 
 [tool.uv]
@@ -27,7 +33,7 @@ package = false
 
 [tool.pytest.ini_options]
 addopts = "-q"
-pythonpath = ["apps/api", "."]
+pythonpath = ["."]
 testpaths = ["tests"]
 
 [tool.ruff]

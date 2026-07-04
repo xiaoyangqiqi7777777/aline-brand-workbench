@@ -1,27 +1,34 @@
-import pytest
-from app.main import app
-from httpx import ASGITransport, AsyncClient
+from fastapi.testclient import TestClient
+
+from apps.api.app.main import app
 
 
-@pytest.mark.asyncio
-async def test_liveness() -> None:
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.get("/api/v1/health/live")
+def test_live_health() -> None:
+    response = TestClient(app).get("/api/v1/health/live")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "api"}
+    assert response.json() == {"status": "ok"}
 
 
-@pytest.mark.asyncio
-async def test_openapi_contract_is_available() -> None:
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.get("/api/openapi.json")
+def test_development_environment_uses_fake_models() -> None:
+    response = TestClient(app).get("/api/v1/dev/environment")
 
     assert response.status_code == 200
-    assert response.json()["info"]["title"] == "Brand Agent Studio API"
+    assert response.json()["text_model_provider"] == "fake"
+    assert response.json()["image_model_provider"] == "fake"
+
+
+def test_development_demo_flow_exposes_project_state_contract() -> None:
+    response = TestClient(app).get("/api/v1/dev/demo-flow")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["project"]["id"] == "demo-project-001"
+    assert payload["current_stage"] == "LOGO"
+    assert payload["stage_runs"]["DIRECTIONS"]["status"] == "SUCCEEDED"
+    assert payload["stage_runs"]["LOGO"]["status"] == "QUEUED"
+    first_direction = payload["versions"]["DIRECTIONS"]["output"]["directions"][0]
+    assert first_direction["id"] == "direction-001"
+    assert payload["decisions"][0]["action"] == "SELECT_VERSION"
+    assert payload["task"]["status"] == "WAITING_USER"
+    assert len(payload["result"]["items"]) == 3
