@@ -13,6 +13,7 @@ from backend.agents.schemas.ip import IPOutput
 from backend.agents.schemas.logo import LogoOutput
 from backend.agents.schemas.materials import MaterialOutput
 from backend.agents.schemas.proposal import ProposalOutput, ProposalSectionType
+from backend.agents.schemas.review import ReviewOutput
 from backend.agents.schemas.vi import VIOutput
 from backend.agents.testing import InMemoryArtifactWriter, InMemoryInvocationRecorder
 from backend.agents.workflow import build_brand_workflow
@@ -533,3 +534,82 @@ def test_ip_confirmation_resumes_after_worker_rebuild_and_generates_materials() 
     assert all(set(scene.used_asset_ids) == expected_references for scene in material_output.scenes)
     assert len(material_invocations) == 3
     assert sum(record.image_count for record in material_invocations) == 2
+
+
+def test_material_confirmation_resumes_after_worker_rebuild_and_generates_review() -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config("thread-materials-to-review-restart")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": "project-materials-to-review-restart",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("materials-review-directions")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("materials-review-logo")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("materials-review-vi")),
+            "confirmed": True,
+        },
+    )
+    waiting_for_materials = _resume(first_worker, config, {"action": "SKIP"})
+    assert waiting_for_materials["__interrupt__"][0].value["kind"] == "material_decision"
+    material_output = MaterialOutput.model_validate(waiting_for_materials["material_output"])
+
+    rebuilt_worker = build()
+    waiting_for_review = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version("materials-review-materials")),
+            "confirmed": True,
+        },
+    )
+    review_output = ReviewOutput.model_validate(waiting_for_review["review_output"])
+    review_invocations = [
+        record for record in invocation_recorder.records if record.capability.value == "REVIEW"
+    ]
+
+    assert waiting_for_review["__interrupt__"][0].value["kind"] == "review_decision"
+    assert waiting_for_review["selected_version_ids"]["MATERIALS"] == str(
+        _version("materials-review-materials")
+    )
+    assert waiting_for_review["review_output"]["pass"] is True
+    assert "passed" not in waiting_for_review["review_output"]
+    assert review_output.passed is True
+    assert review_output.issues == []
+    assert len(review_invocations) == 1
+    assert review_invocations[0].image_count == 0
+    assert len({scene.preview_asset_id for scene in material_output.scenes}) == 2
