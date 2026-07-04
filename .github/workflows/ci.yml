@@ -21,6 +21,7 @@ jobs:
       - run: npm ci
       - run: npm run lint:web
       - run: npm run typecheck:web
+      - run: npm run test:web
       - run: npm run build:web
 
   backend:
@@ -36,6 +37,7 @@ jobs:
           python-version-file: .python-version
       - run: uv sync --frozen
       - run: uv run ruff check .
+      - run: uv run ruff format --check .
       - run: uv run pytest
 
   compose:

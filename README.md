@@ -1,82 +1,124 @@
-# Brand Agent Studio
+# Aline Brand Workbench
 
-面向五人团队协作的品牌生成工作台。当前 `main` 提供开发环境基线，不包含业务功能。
+品牌 Agent 项目的共同开发仓库。当前目标是在约 7 天内先跑通完整逻辑，默认使用假 AI，不追求生成和页面效果。
 
-## 环境要求
+原有视觉原型保存在 `prototypes/legacy/index.html`。正式网页代码放在 `apps/web/`。
 
-所有成员只需安装：
+当前 2 名前端、3 名后端的职责和第一轮任务见 [`docs/team-plan.md`](docs/team-plan.md)。
 
-- Git
-- Docker Desktop（包含 Docker Compose）
+## 所有人先安装
 
-可选的本地开发工具：
+必装：
 
-- Node.js 22（见 `.nvmrc`）
-- Python 3.12（见 `.python-version`）
+1. Git
+2. Docker Desktop（打开后确保 Docker 正在运行）
+3. 任意 AI Coding 工具：Codex、Cursor、Claude Code 等
+
+默认使用 Docker 时，不需要单独安装 PostgreSQL、Redis、MinIO、Node.js 或 Python。
+
+如果希望脱离 Docker 本地运行，再额外安装：
+
+- Node.js 22
+- Python 3.12
 - uv
+
+检查共同环境：
+
+```bash
+./scripts/check-environment.sh
+```
 
 ## 第一次启动
 
 ```bash
+git clone https://github.com/xiaoyangqiqi7777777/aline-brand-workbench.git
+cd aline-brand-workbench
 cp .env.example .env
-./scripts/check-environment.sh
 docker compose up --build
 ```
 
-启动完成后可访问：
+服务全部健康后访问：
 
-- 统一入口：<http://localhost:8080>
-- Web：<http://localhost:3000>
-- API 文档：<http://localhost:8000/api/docs>
-- API 就绪检查：<http://localhost:8000/api/v1/health/ready>
-- MinIO 控制台：<http://localhost:9001>
+| 服务 | 地址 | 用途 |
+|---|---|---|
+| 统一入口 | http://localhost:8080 | 所有人优先使用这个地址 |
+| Next.js 网页 | http://localhost:3000 | 前端直接调试 |
+| FastAPI 文档 | http://localhost:8000/api/docs | 查看和测试后端接口 |
+| API 健康检查 | http://localhost:8000/api/v1/health/ready | 检查数据库和 Redis |
+| MinIO 控制台 | http://localhost:9001 | 查看本地上传文件 |
+| PostgreSQL | 127.0.0.1:5432 | 本地数据库，仅绑定本机 |
+| Redis | 127.0.0.1:6379 | 本地任务队列，仅绑定本机 |
 
-停止环境：
+MinIO 本地账号来自 `.env`：
+
+- 用户名：`brand-agent-local`
+- 密码：`brand-agent-local-secret`
+
+这些只用于本地开发，线上必须更换。
+
+## 常用命令
 
 ```bash
+make dev       # 启动全部服务
+make down      # 停止服务
+make logs      # 查看日志
+make ps        # 查看服务状态
+make check     # 提交代码前的全部检查
+make clean     # 删除容器和本地开发数据
+```
+
+直接使用 Docker Compose 也可以：
+
+```bash
+docker compose up --build
 docker compose down
+docker compose logs -f --tail=200
 ```
 
-需要同时删除本地数据库、缓存和对象存储数据时：
+## 不使用 Docker 的本地启动方式
 
 ```bash
-docker compose down -v
-```
-
-## 本地运行
-
-前端：
-
-```bash
-npm ci
-npm run dev:web
-```
-
-后端：
-
-```bash
+cp .env.example .env
+npm install
 uv sync
-uv run uvicorn app.main:app --app-dir apps/api --reload --port 8000
+
+npm run dev:web
+uv run uvicorn apps.api.app.main:app --reload --port 8000
+uv run celery -A apps.api.app.celery_app.celery_app worker --loglevel=INFO
 ```
 
-## 目录边界
+本地直接运行 API 时，需要把 `.env` 中的 `postgres`、`redis`、`minio` 主机名改为 `localhost`，数据库等基础服务仍可通过 Docker 启动。
+
+## 团队统一约定
+
+- 默认 `TEXT_MODEL_PROVIDER=fake`、`IMAGE_MODEL_PROVIDER=fake`，不要自行加入真实密钥。
+- 每个人从最新 `main` 创建自己的功能分支，不直接修改 `main`。
+- `.env`、模型密钥、数据库密码禁止提交 Git。
+- 公共假数据放在 `contracts/examples/`，不要在每个模块复制一份。
+- 接口字段由后端负责人确认；前端从 OpenAPI 或共享契约读取。
+- 提交前运行 `make check`，把实际结果写进 PR。
+- 端口冲突时只修改自己本机 `.env`，不要修改公共默认值。
+
+## 项目结构
 
 ```text
-apps/web/                  Next.js Web
-apps/api/                  FastAPI API
-backend/agents/            Agent、Schema、Prompt、LangGraph
-backend/providers/         模型 Provider
-backend/infrastructure/    数据库与对象存储适配器
-backend/exports/           PDF、PPTX、ZIP 导出
-infra/nginx/               本地统一入口
-infra/migrations/          数据库迁移
-scripts/                   开发与验收脚本
-tests/                     后端与 E2E 测试
+apps/web/            Next.js 网页
+apps/api/            FastAPI 和 Celery Worker
+contracts/examples/  全团队共用的假数据
+infra/docker/        Web/API 镜像
+infra/nginx/         统一入口
+tests/               后端和流程测试
+compose.yaml         一键启动全部服务
+prototypes/legacy/  原始视觉原型
 ```
 
-## 分支与提交
+## 环境出现问题时
 
-- 从最新 `main` 创建个人功能分支，不直接在 `main` 开发。
-- 分支使用 `feat/frontend-1-*`、`feat/frontend-2-*`、`feat/backend-1-*` 等角色前缀。
-- 不提交 `.env`、密钥、数据库文件、对象存储数据、依赖目录或构建产物。
-- API/Schema 变更应同时提交契约、迁移（如需要）、测试和说明。
+```bash
+docker compose ps
+docker compose logs api --tail=200
+docker compose logs web --tail=200
+docker compose logs worker --tail=200
+```
+
+仍无法启动时，把以下内容发给后端 3（环境负责人）：操作系统、`docker compose ps` 输出、失败服务日志，以及自己是否修改过 `.env`。

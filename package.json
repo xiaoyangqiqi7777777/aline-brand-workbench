@@ -16,6 +16,7 @@
     "dev:web": "npm run dev --workspace @brand-studio/web",
     "build:web": "npm run build --workspace @brand-studio/web",
     "lint:web": "npm run lint --workspace @brand-studio/web",
-    "typecheck:web": "npm run typecheck --workspace @brand-studio/web"
+    "typecheck:web": "npm run typecheck --workspace @brand-studio/web",
+    "test:web": "npm run test --workspace @brand-studio/web"
   }
 }

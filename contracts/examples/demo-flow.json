@@ -1,0 +1,40 @@
+{
+  "project": {
+    "id": "demo-project-001",
+    "workspace_id": "local-workspace",
+    "name": "演示品牌",
+    "current_stage": "DIRECTIONS",
+    "status": "ACTIVE",
+    "version": 1
+  },
+  "task": {
+    "id": "demo-task-001",
+    "project_id": "demo-project-001",
+    "stage": "DIRECTIONS",
+    "status": "WAITING_USER",
+    "error": null
+  },
+  "result": {
+    "id": "demo-result-001",
+    "stage": "DIRECTIONS",
+    "version": 1,
+    "selected": false,
+    "items": [
+      {
+        "id": "direction-001",
+        "title": "方向一",
+        "summary": "共享环境中的固定假数据。"
+      },
+      {
+        "id": "direction-002",
+        "title": "方向二",
+        "summary": "前端、后端、测试和导出共同读取。"
+      },
+      {
+        "id": "direction-003",
+        "title": "方向三",
+        "summary": "真实模型接入前不改变字段结构。"
+      }
+    ]
+  }
+}
