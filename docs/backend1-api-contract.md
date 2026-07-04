@@ -29,6 +29,12 @@ HTTP 状态码为 `422`。
 
 ## Projects
 
+### GET `/api/v1/dev/demo-flow`
+
+开发环境共享假数据。返回体包含与项目恢复接口一致的 `project`、`brand_spec`、`current_stage`、`stage_runs`、`versions` 和 `decisions` 字段，供前后端联调时读取同一份示例契约。
+
+为兼容 M0 早期消费者，当前仍保留旧的 `task` 和 `result` 字段；新联调优先使用项目状态字段。
+
 ### POST `/api/v1/projects`
 
 创建项目并排队首个 `INTAKE` StageRun。
