@@ -1,4 +1,5 @@
 """Object storage adapters."""
+
 from backend.infrastructure.storage.errors import (
     ArtifactNotFound,
     ArtifactStorageError,

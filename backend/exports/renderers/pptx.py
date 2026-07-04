@@ -61,15 +61,14 @@ def _root_rels() -> str:
 
 def _presentation(slide_count: int) -> str:
     slide_ids = "".join(
-        f'<p:sldId id="{256 + index}" r:id="rId{index}"/>'
-        for index in range(1, slide_count + 1)
+        f'<p:sldId id="{256 + index}" r:id="rId{index}"/>' for index in range(1, slide_count + 1)
     )
     return (
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" '
         'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" '
         'xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main">'
-        f"<p:sldMasterIdLst><p:sldMasterId id=\"2147483648\" r:id=\"rId{slide_count + 1}\"/>"
+        f'<p:sldMasterIdLst><p:sldMasterId id="2147483648" r:id="rId{slide_count + 1}"/>'
         f"</p:sldMasterIdLst><p:sldIdLst>{slide_ids}</p:sldIdLst>"
         '<p:sldSz cx="12192000" cy="6858000" type="wide"/>'
         '<p:notesSz cx="6858000" cy="9144000"/>'
@@ -194,10 +193,10 @@ def _theme() -> str:
         '<a:accent6><a:srgbClr val="06B6D4"/></a:accent6>'
         '<a:hlink><a:srgbClr val="2563EB"/></a:hlink>'
         '<a:folHlink><a:srgbClr val="7C3AED"/></a:folHlink>'
-        "</a:clrScheme><a:fontScheme name=\"Brand Studio\">"
+        '</a:clrScheme><a:fontScheme name="Brand Studio">'
         '<a:majorFont><a:latin typeface="Arial"/></a:majorFont>'
         '<a:minorFont><a:latin typeface="Arial"/></a:minorFont>'
-        "</a:fontScheme><a:fmtScheme name=\"Brand Studio\">"
+        '</a:fontScheme><a:fmtScheme name="Brand Studio">'
         "<a:fillStyleLst/><a:lnStyleLst/><a:effectStyleLst/><a:bgFillStyleLst/>"
         "</a:fmtScheme></a:themeElements></a:theme>"
     )

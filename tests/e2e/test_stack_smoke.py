@@ -45,10 +45,7 @@ def test_compose_services_are_running_and_healthy() -> None:
         ("api docs", lambda: f"http://127.0.0.1:{_config_value('API_PORT', '8000')}/api/docs"),
         (
             "minio live",
-            lambda: (
-                f"http://127.0.0.1:{_config_value('MINIO_API_PORT', '9000')}"
-                "/minio/health/live"
-            ),
+            lambda: f"http://127.0.0.1:{_config_value('MINIO_API_PORT', '9000')}/minio/health/live",
         ),
     ],
 )
@@ -90,8 +87,7 @@ def _wait_for_compose_health(
         unhealthy = {
             name: service
             for name, service in by_service.items()
-            if name in _LONG_RUNNING_SERVICES | proxy_names
-            and not _is_running_and_healthy(service)
+            if name in _LONG_RUNNING_SERVICES | proxy_names and not _is_running_and_healthy(service)
         }
         if not missing and not missing_proxy and not unhealthy:
             return missing, missing_proxy, unhealthy

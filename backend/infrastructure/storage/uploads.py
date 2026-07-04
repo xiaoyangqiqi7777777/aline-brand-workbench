@@ -50,9 +50,7 @@ class FileArtifactService:
     def store_file(self, request: FileArtifactUploadRequest) -> StoredFileArtifact:
         body = _validate_body(request.body)
         artifact_id = (
-            normalize_artifact_id(request.artifact_id)
-            if request.artifact_id
-            else str(uuid4())
+            normalize_artifact_id(request.artifact_id) if request.artifact_id else str(uuid4())
         )
         filename = sanitize_storage_filename(
             request.filename,

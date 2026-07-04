@@ -39,7 +39,4 @@ def create_asset_url_map(
         references,
         expires_in_seconds=expires_in_seconds,
     )
-    return {
-        artifact_id: presigned_url.url
-        for artifact_id, presigned_url in presigned_urls.items()
-    }
+    return {artifact_id: presigned_url.url for artifact_id, presigned_url in presigned_urls.items()}
