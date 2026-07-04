@@ -9,7 +9,9 @@ from backend.agents.schemas.brand_spec import BrandSpec
 from backend.agents.schemas.directions import DirectionOutput
 from backend.agents.schemas.intake import IntakeOutput
 from backend.agents.schemas.ip import IPOutput
+from backend.agents.schemas.logo import LogoOutput
 from backend.agents.schemas.proposal import ProposalOutput, ProposalSectionType
+from backend.agents.schemas.vi import VIOutput
 from backend.agents.testing import InMemoryArtifactWriter, InMemoryInvocationRecorder
 from backend.agents.workflow import build_brand_workflow
 from backend.providers.models.fake import FakeImageModelProvider, FakeTextModelProvider
@@ -305,3 +307,59 @@ def test_graph_can_resume_after_worker_rebuild() -> None:
     assert resumed["__interrupt__"][0].value["kind"] == "logo_decision"
     assert resumed["selected_direction_id"] == "direction-clear"
     assert any(record.capability.value == "LOGO" for record in invocation_recorder.records)
+
+
+def test_logo_selection_resumes_after_worker_rebuild_and_reaches_vi_decision() -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config("thread-logo-to-vi-restart")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": "project-logo-to-vi-restart",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    waiting_for_logo = _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("restart-directions-for-vi")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    logo_output = LogoOutput.model_validate(waiting_for_logo["logo_output"])
+    selected_logo = next(
+        concept for concept in logo_output.concepts if concept.id == "logo-wordmark"
+    )
+    assert waiting_for_logo["__interrupt__"][0].value["kind"] == "logo_decision"
+
+    rebuilt_worker = build()
+    waiting_for_vi = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version("restart-logo")),
+            "selected_item_id": selected_logo.id,
+        },
+    )
+    vi_output = VIOutput.model_validate(waiting_for_vi["vi_output"])
+
+    assert waiting_for_vi["__interrupt__"][0].value["kind"] == "vi_decision"
+    assert waiting_for_vi["selected_logo_id"] == selected_logo.id
+    assert waiting_for_vi["selected_version_ids"]["LOGO"] == str(_version("restart-logo"))
+    assert vi_output.source_logo_asset_id == selected_logo.preview_asset_id
+    assert sum(record.capability.value == "VI" for record in invocation_recorder.records) == 1
