@@ -1,13 +1,13 @@
-# Local configuration and secrets
+# Environment and secrets
 .env
-.env.*
+.env.local
+.env.*.local
 !.env.example
 
 # JavaScript
 node_modules/
 .next/
 out/
-dist/
 npm-debug.log*
 *.tsbuildinfo
 
@@ -20,16 +20,12 @@ __pycache__/
 .coverage
 htmlcov/
 
-# Local infrastructure data
-.data/
-*.sqlite3
+# Generated files
+artifacts/
+tmp/
+*.log
 
-# Editors and operating systems
+# Editors and OS
 .DS_Store
 .idea/
 .vscode/
-*.swp
-
-# Generated exports
-/exports/
-/tmp/

@@ -1,21 +1,23 @@
 {
-  "name": "brand-agent-studio",
+  "name": "aline-brand-workbench",
   "version": "0.1.0",
   "private": true,
-  "engines": {
-    "node": ">=22 <23",
-    "npm": ">=10"
-  },
   "workspaces": [
     "apps/web"
   ],
-  "overrides": {
-    "postcss": "8.5.10"
-  },
   "scripts": {
-    "dev:web": "npm run dev --workspace @brand-studio/web",
-    "build:web": "npm run build --workspace @brand-studio/web",
-    "lint:web": "npm run lint --workspace @brand-studio/web",
-    "typecheck:web": "npm run typecheck --workspace @brand-studio/web"
+    "dev:web": "npm run dev --workspace @aline/web",
+    "build:web": "npm run build --workspace @aline/web",
+    "lint:web": "npm run lint --workspace @aline/web",
+    "typecheck:web": "npm run typecheck --workspace @aline/web",
+    "test:web": "npm run test --workspace @aline/web"
+  },
+  "engines": {
+    "node": ">=22 <25"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.10"
+    }
   }
 }

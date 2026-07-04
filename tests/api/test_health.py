@@ -1,27 +1,18 @@
-import pytest
-from app.main import app
-from httpx import ASGITransport, AsyncClient
+from fastapi.testclient import TestClient
+
+from apps.api.app.main import app
 
 
-@pytest.mark.asyncio
-async def test_liveness() -> None:
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.get("/api/v1/health/live")
+def test_live_health() -> None:
+    response = TestClient(app).get("/api/v1/health/live")
 
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "service": "api"}
+    assert response.json() == {"status": "ok"}
 
 
-@pytest.mark.asyncio
-async def test_openapi_contract_is_available() -> None:
-    async with AsyncClient(
-        transport=ASGITransport(app=app),
-        base_url="http://test",
-    ) as client:
-        response = await client.get("/api/openapi.json")
+def test_development_environment_uses_fake_models() -> None:
+    response = TestClient(app).get("/api/v1/dev/environment")
 
     assert response.status_code == 200
-    assert response.json()["info"]["title"] == "Brand Agent Studio API"
+    assert response.json()["text_model_provider"] == "fake"
+    assert response.json()["image_model_provider"] == "fake"

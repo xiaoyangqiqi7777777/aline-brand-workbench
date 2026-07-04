@@ -1,1 +1,1 @@
-"""Application services and business workflows."""
+"""Application use cases."""

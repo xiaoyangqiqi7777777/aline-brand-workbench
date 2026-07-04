@@ -1,1 +1,1 @@
-"""Brand Agent Studio API package."""
+"""Brand Agent Studio API."""
