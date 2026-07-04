@@ -229,6 +229,16 @@ def test_list_stage_versions_missing_project_returns_404(api_client) -> None:
     assert response.json() == {"detail": "Project not found"}
 
 
+def test_list_stage_versions_invalid_stage_returns_422(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.get(f"/api/v1/projects/{seeded.project_id}/stages/nope/versions")
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid stage key: nope"}
+
+
 def test_create_stage_decision_dispatches_logo_run_and_is_idempotent(
     api_client,
     monkeypatch,

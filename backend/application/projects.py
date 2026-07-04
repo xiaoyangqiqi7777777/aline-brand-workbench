@@ -228,6 +228,10 @@ async def list_stage_versions(
     workspace_id: str,
     stage_key: str,
 ) -> list[StageVersion] | None:
+    stage = normalize_stage_key(stage_key)
+    if stage not in KNOWN_PROJECT_STAGES:
+        raise InvalidStageKeyError(f"Invalid stage key: {stage_key}")
+
     found_project_id = await session.scalar(
         select(Project.id).where(Project.id == project_id, Project.workspace_id == workspace_id)
     )
@@ -238,7 +242,7 @@ async def list_stage_versions(
         select(StageVersion)
         .where(
             StageVersion.project_id == project_id,
-            StageVersion.stage == normalize_stage_key(stage_key),
+            StageVersion.stage == stage,
         )
         .order_by(StageVersion.version_no.desc())
     )

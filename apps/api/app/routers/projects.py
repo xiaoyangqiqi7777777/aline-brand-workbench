@@ -247,12 +247,15 @@ async def list_stage_versions_route(
     stage_key: str,
     session: SessionDependency,
 ) -> list[StageVersionStateResponse]:
-    versions = await list_stage_versions(
-        session,
-        project_id=project_id,
-        workspace_id=get_settings().default_workspace_id,
-        stage_key=stage_key,
-    )
+    try:
+        versions = await list_stage_versions(
+            session,
+            project_id=project_id,
+            workspace_id=get_settings().default_workspace_id,
+            stage_key=stage_key,
+        )
+    except InvalidStageKeyError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
     if versions is None:
         raise HTTPException(status_code=404, detail="Project not found")
     return [
