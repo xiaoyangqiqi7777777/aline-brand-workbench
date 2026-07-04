@@ -102,6 +102,8 @@ async def create_stage_decision(
         raise StageDecisionNotFoundError("Stage version not found")
     if source_version.stage != stage:
         raise StageDecisionConflictError("Stage version does not belong to requested stage")
+    if source_version.status != "GENERATED":
+        raise StageDecisionConflictError("Only a generated Stage version can be decided")
 
     if stage == "DIRECTIONS":
         if action != "SELECT_VERSION":

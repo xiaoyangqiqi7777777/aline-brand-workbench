@@ -1248,6 +1248,39 @@ def test_stage_decision_exposes_stale_downstream_versions(
     assert logo_versions_payload[0]["status"] == "STALE"
 
 
+def test_stage_decision_rejects_stale_stage_version(api_client, monkeypatch) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    stale_logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    direction_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/decisions",
+        json={
+            "version_id": seeded.directions_version_id,
+            "selected_item_id": seeded.direction_ids[0],
+        },
+    )
+    stale_logo_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
+        json={
+            "version_id": stale_logo_version_id,
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+
+    assert direction_response.status_code == 202
+    assert stale_logo_response.status_code == 409
+    assert stale_logo_response.json() == {
+        "detail": "Only a generated Stage version can be decided",
+    }
+
+
 def test_logo_stage_decision_exposes_stale_downstream_versions(
     api_client,
     monkeypatch,
