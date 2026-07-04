@@ -5,7 +5,7 @@ import json
 from uuid import uuid4
 
 from langgraph.types import Command
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.agents.ports import RecoverableInvocationRecorder
@@ -13,7 +13,11 @@ from backend.agents.schemas.brand_spec import BrandSpec
 from backend.agents.schemas.directions import DirectionOutput
 from backend.agents.schemas.intake import IntakeOutput, IntakeResumePayload
 from backend.agents.schemas.logo import LogoOutput
-from backend.application.stages import KNOWN_PROJECT_STAGES, normalize_stage_key
+from backend.application.stages import (
+    KNOWN_PROJECT_STAGES,
+    downstream_project_stages,
+    normalize_stage_key,
+)
 from backend.infrastructure.database.models import (
     BrandSpecRecord,
     Decision,
@@ -184,9 +188,35 @@ async def create_direction_selection_run(
         topic="agent.stage_run.requested",
         payload_json={"stage_run_id": run_id},
     )
+    await mark_downstream_versions_stale(
+        session,
+        project_id=source_run.project_id,
+        stage=source_run.stage,
+    )
     session.add_all([decision, event])
     await session.commit()
     return resumed_run, decision, event
+
+
+async def mark_downstream_versions_stale(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    stage: str,
+) -> None:
+    downstream_stages = downstream_project_stages(stage)
+    if not downstream_stages:
+        return
+
+    await session.execute(
+        update(StageVersion)
+        .where(
+            StageVersion.project_id == project_id,
+            StageVersion.stage.in_(downstream_stages),
+            StageVersion.status != "STALE",
+        )
+        .values(status="STALE")
+    )
 
 
 async def create_intake_resume_run(
