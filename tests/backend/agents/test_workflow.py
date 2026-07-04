@@ -11,6 +11,7 @@ from backend.agents.schemas.directions import DirectionOutput
 from backend.agents.schemas.intake import IntakeOutput
 from backend.agents.schemas.ip import IPOutput
 from backend.agents.schemas.logo import LogoOutput
+from backend.agents.schemas.materials import MaterialOutput
 from backend.agents.schemas.proposal import ProposalOutput, ProposalSectionType
 from backend.agents.schemas.vi import VIOutput
 from backend.agents.testing import InMemoryArtifactWriter, InMemoryInvocationRecorder
@@ -447,3 +448,88 @@ def test_vi_confirmation_and_ip_choice_resume_after_worker_rebuild(
         IPOutput.model_validate(resumed["ip_output"])
     else:
         assert "ip_output" not in resumed
+        material_output = MaterialOutput.model_validate(resumed["material_output"])
+        vi_output = VIOutput.model_validate(waiting_for_ip_choice["vi_output"])
+        assert all(
+            scene.used_asset_ids == [vi_output.source_logo_asset_id]
+            for scene in material_output.scenes
+        )
+
+
+def test_ip_confirmation_resumes_after_worker_rebuild_and_generates_materials() -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config("thread-ip-to-materials-restart")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": "project-ip-to-materials-restart",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("ip-materials-directions")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("ip-materials-logo")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("ip-materials-vi")),
+            "confirmed": True,
+        },
+    )
+    waiting_for_ip = _resume(first_worker, config, {"action": "GENERATE"})
+    assert waiting_for_ip["__interrupt__"][0].value["kind"] == "ip_decision"
+    vi_output = VIOutput.model_validate(waiting_for_ip["vi_output"])
+    ip_output = IPOutput.model_validate(waiting_for_ip["ip_output"])
+
+    rebuilt_worker = build()
+    waiting_for_materials = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version("ip-materials-ip")),
+            "confirmed": True,
+        },
+    )
+    material_output = MaterialOutput.model_validate(waiting_for_materials["material_output"])
+    material_invocations = [
+        record for record in invocation_recorder.records if record.capability.value == "MATERIALS"
+    ]
+    expected_references = {
+        vi_output.source_logo_asset_id,
+        ip_output.preview_asset_id,
+    }
+
+    assert waiting_for_materials["__interrupt__"][0].value["kind"] == "material_decision"
+    assert waiting_for_materials["selected_version_ids"]["IP"] == str(_version("ip-materials-ip"))
+    assert len(material_output.scenes) == 2
+    assert all(set(scene.used_asset_ids) == expected_references for scene in material_output.scenes)
+    assert len(material_invocations) == 3
+    assert sum(record.image_count for record in material_invocations) == 2
