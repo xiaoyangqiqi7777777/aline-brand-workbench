@@ -1,0 +1,31 @@
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# JavaScript
+node_modules/
+.next/
+out/
+npm-debug.log*
+*.tsbuildinfo
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Generated files
+artifacts/
+tmp/
+*.log
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/

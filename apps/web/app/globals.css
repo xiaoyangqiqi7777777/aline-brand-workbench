@@ -1,0 +1,142 @@
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  background: #f6f7f9;
+  color: #16181d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.shell {
+  width: min(1040px, calc(100% - 40px));
+  margin: 0 auto;
+  padding: 80px 0;
+}
+
+.hero,
+.notes {
+  padding: 32px;
+  border: 1px solid #e4e7ec;
+  border-radius: 24px;
+  background: #ffffff;
+  box-shadow: 0 24px 80px rgba(24, 31, 45, 0.06);
+}
+
+.eyebrow {
+  margin: 0 0 12px;
+  color: #667085;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+}
+
+h1,
+h2,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  margin-bottom: 12px;
+  font-size: clamp(32px, 6vw, 64px);
+  line-height: 1.05;
+}
+
+.lead {
+  max-width: 720px;
+  margin-bottom: 24px;
+  color: #667085;
+  font-size: 17px;
+  line-height: 1.7;
+}
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: #f2f4f7;
+  font-weight: 700;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #f79009;
+}
+
+.status[data-state="ready"] .status-dot {
+  background: #12b76a;
+}
+
+.status[data-state="error"] .status-dot {
+  background: #f04438;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  margin: 16px 0;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 120px;
+  padding: 24px;
+  border: 1px solid #e4e7ec;
+  border-radius: 20px;
+  background: #ffffff;
+  transition: transform 160ms ease, box-shadow 160ms ease;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 18px 50px rgba(24, 31, 45, 0.08);
+}
+
+.card span,
+.notes li {
+  color: #667085;
+}
+
+.notes ul {
+  margin-bottom: 0;
+  padding-left: 20px;
+  line-height: 1.9;
+}
+
+@media (max-width: 720px) {
+  .shell {
+    width: min(100% - 24px, 1040px);
+    padding: 32px 0;
+  }
+
+  .hero,
+  .notes {
+    padding: 24px;
+    border-radius: 18px;
+  }
+
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}
