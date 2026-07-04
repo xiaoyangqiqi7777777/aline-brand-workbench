@@ -21,6 +21,7 @@ from backend.infrastructure.database.session import get_db_session
 @dataclass(frozen=True)
 class SeededDirectionsProject:
     project_id: str
+    directions_run_id: str
     directions_version_id: str
     direction_ids: list[str]
 
@@ -104,6 +105,7 @@ async def seed_directions_project(
 
         return SeededDirectionsProject(
             project_id=project.id,
+            directions_run_id=directions_run.id,
             directions_version_id=directions_version.id,
             direction_ids=direction_ids,
         )
@@ -372,6 +374,78 @@ def test_create_stage_decision_unsupported_stage_returns_409(api_client) -> None
     assert response.status_code == 409
     assert response.json() == {
         "detail": "LOGO decisions are not supported by this worker milestone",
+    }
+
+
+def test_legacy_direction_selection_dispatches_logo_run(api_client, monkeypatch) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    response = client.post(
+        f"/api/v1/stage-runs/{seeded.directions_run_id}/direction-selection",
+        json={
+            "version_id": seeded.directions_version_id,
+            "direction_id": seeded.direction_ids[0],
+        },
+    )
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["stage"] == "LOGO"
+    assert payload["parent_stage_run_id"] == seeded.directions_run_id
+    assert dispatched_stage_run_ids == [payload["id"]]
+
+
+def test_legacy_direction_selection_missing_stage_run_returns_404(api_client) -> None:
+    client, _ = api_client
+
+    response = client.post(
+        f"/api/v1/stage-runs/{uuid4()}/direction-selection",
+        json={
+            "version_id": str(uuid4()),
+            "direction_id": "direction-a",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Stage run not found"}
+
+
+def test_legacy_direction_selection_conflicting_selection_returns_409(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    endpoint = f"/api/v1/stage-runs/{seeded.directions_run_id}/direction-selection"
+    first_payload = {
+        "version_id": seeded.directions_version_id,
+        "direction_id": seeded.direction_ids[0],
+    }
+    conflicting_payload = {
+        "version_id": seeded.directions_version_id,
+        "direction_id": seeded.direction_ids[1],
+    }
+
+    assert client.post(endpoint, json=first_payload).status_code == 202
+    response = client.post(endpoint, json=conflicting_payload)
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "This Directions version already has another selection",
     }
 
 
