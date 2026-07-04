@@ -613,3 +613,122 @@ def test_material_confirmation_resumes_after_worker_rebuild_and_generates_review
     assert len(review_invocations) == 1
     assert review_invocations[0].image_count == 0
     assert len({scene.preview_asset_id for scene in material_output.scenes}) == 2
+
+
+def test_review_decision_resumes_after_worker_rebuild_and_generates_proposal() -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config("thread-review-to-proposal-restart")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": "project-review-to-proposal-restart",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-directions")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-logo")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-vi")),
+            "confirmed": True,
+        },
+    )
+    waiting_for_materials = _resume(first_worker, config, {"action": "SKIP"})
+    waiting_for_review = _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-materials")),
+            "confirmed": True,
+        },
+    )
+    assert waiting_for_review["__interrupt__"][0].value["kind"] == "review_decision"
+    direction_output = DirectionOutput.model_validate(waiting_for_review["direction_output"])
+    logo_output = LogoOutput.model_validate(waiting_for_review["logo_output"])
+    material_output = MaterialOutput.model_validate(waiting_for_materials["material_output"])
+    selected_direction = next(
+        item for item in direction_output.directions if item.id == "direction-clear"
+    )
+    selected_logo = next(item for item in logo_output.concepts if item.id == "logo-wordmark")
+    artifact_count_before_proposal = len(artifact_writer.items)
+
+    rebuilt_worker = build()
+    waiting_for_proposal = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-review")),
+            "proceed": True,
+            "accepted_issue_ids": [],
+        },
+    )
+    proposal = ProposalOutput.model_validate(waiting_for_proposal["proposal_output"])
+    proposal_invocations = [
+        record for record in invocation_recorder.records if record.capability.value == "PROPOSAL"
+    ]
+    sections = {section.type: section for section in proposal.sections}
+    expected_asset_refs = {
+        selected_direction.preview_asset_id,
+        selected_logo.preview_asset_id,
+        *(scene.preview_asset_id for scene in material_output.scenes),
+    }
+
+    assert waiting_for_proposal["__interrupt__"][0].value["kind"] == "proposal_decision"
+    assert waiting_for_proposal["selected_version_ids"]["REVIEW"] == str(
+        _version("review-proposal-review")
+    )
+    assert [section.type for section in proposal.sections] == [
+        ProposalSectionType.BRIEF,
+        ProposalSectionType.DIRECTION,
+        ProposalSectionType.LOGO,
+        ProposalSectionType.VI,
+        ProposalSectionType.MATERIALS,
+        ProposalSectionType.REVIEW_SUMMARY,
+    ]
+    assert sections[ProposalSectionType.BRIEF].version_id == _version("review-proposal-directions")
+    assert sections[ProposalSectionType.DIRECTION].version_id == _version(
+        "review-proposal-directions"
+    )
+    assert sections[ProposalSectionType.LOGO].version_id == _version("review-proposal-logo")
+    assert sections[ProposalSectionType.VI].version_id == _version("review-proposal-vi")
+    assert sections[ProposalSectionType.MATERIALS].version_id == _version(
+        "review-proposal-materials"
+    )
+    assert sections[ProposalSectionType.REVIEW_SUMMARY].version_id == _version(
+        "review-proposal-review"
+    )
+    assert set(proposal.asset_refs) == expected_asset_refs
+    assert ProposalSectionType.IP not in sections
+    assert len(proposal_invocations) == 1
+    assert proposal_invocations[0].image_count == 0
+    assert len(artifact_writer.items) == artifact_count_before_proposal
