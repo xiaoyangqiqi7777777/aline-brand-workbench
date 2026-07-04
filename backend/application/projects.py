@@ -287,6 +287,11 @@ async def request_stage_control(
     if found_project_id is None:
         raise ProjectNotFoundError("Project not found")
 
+    if stage == "IP" and action == "SKIP" and source_version_id is not None:
+        raise StageControlConflictError("IP skip does not accept source_version_id")
+    if stage == "IP" and action == "GENERATE" and source_version_id is not None:
+        raise StageControlConflictError("IP generate does not accept source_version_id")
+
     source_version: StageVersion | None = None
     if source_version_id is not None:
         source_version = await session.get(StageVersion, source_version_id)
@@ -306,8 +311,6 @@ async def request_stage_control(
         )
 
     if stage == "IP" and action == "SKIP":
-        if source_version_id is not None:
-            raise StageControlConflictError("IP skip does not accept source_version_id")
         return await _skip_ip_choice(
             session,
             project_id=project_id,
@@ -316,8 +319,6 @@ async def request_stage_control(
         )
 
     if stage == "IP" and action == "GENERATE":
-        if source_version_id is not None:
-            raise StageControlConflictError("IP generate does not accept source_version_id")
         return await _generate_ip_choice(
             session,
             project_id=project_id,

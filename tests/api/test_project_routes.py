@@ -1714,6 +1714,33 @@ def test_stage_control_supported_stage_returns_current_milestone_error(
     assert response.json() == {"detail": expected_detail}
 
 
+@pytest.mark.parametrize(
+    ("action", "expected_detail"),
+    [
+        ("skip", "IP skip does not accept source_version_id"),
+        ("generate", "IP generate does not accept source_version_id"),
+    ],
+)
+def test_ip_stage_control_rejects_source_version_before_lookup(
+    api_client,
+    action: str,
+    expected_detail: str,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/{action}",
+        json={
+            "source_version_id": str(uuid4()),
+            "reason": "client sent an unsupported field",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": expected_detail}
+
+
 def test_stage_redo_requires_source_version(api_client) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
