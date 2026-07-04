@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import re
-
 from backend.exports.models import (
     ExportArtifactTarget,
-    ExportFormat,
     ExportRequest,
     StoredExportArtifact,
 )
@@ -13,9 +10,8 @@ from backend.infrastructure.storage import (
     ArtifactReference,
     ArtifactStorage,
     ArtifactUpload,
+    build_prefixed_artifact_object_key,
 )
-
-_SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
 class ExportArtifactService:
@@ -34,11 +30,11 @@ class ExportArtifactService:
         target: ExportArtifactTarget,
     ) -> StoredExportArtifact:
         export = self._renderer.render(request)
-        object_key = _build_export_object_key(
+        object_key = build_prefixed_artifact_object_key(
             prefix=target.object_key_prefix,
             artifact_id=target.artifact_id,
             filename=export.filename,
-            export_format=export.format,
+            fallback_filename=f"brand-export.{export.format.value}",
         )
         reference = ArtifactReference(
             artifact_id=target.artifact_id,
@@ -67,31 +63,3 @@ class ExportArtifactService:
             etag=stored.etag,
             version_id=stored.version_id,
         )
-
-
-def _build_export_object_key(
-    *,
-    prefix: str,
-    artifact_id: str,
-    filename: str,
-    export_format: ExportFormat,
-) -> str:
-    safe_prefix = _safe_prefix(prefix)
-    safe_filename = _safe_filename(filename) or f"brand-export.{export_format.value}"
-    return f"{safe_prefix}/{artifact_id}/{safe_filename}"
-
-
-def _safe_prefix(value: str) -> str:
-    parts = [
-        _safe_filename(part)
-        for part in value.replace("\\", "/").split("/")
-        if part not in {"", ".", ".."}
-    ]
-    return "/".join(parts or ["exports"])
-
-
-def _safe_filename(value: str) -> str:
-    filename = value.replace("\\", "/").rsplit("/", maxsplit=1)[-1]
-    safe = _SAFE_FILENAME_RE.sub("-", filename).strip(".-")
-    safe = re.sub(r"-+(\.[A-Za-z0-9]+)$", r"\1", safe)
-    return safe[:180]

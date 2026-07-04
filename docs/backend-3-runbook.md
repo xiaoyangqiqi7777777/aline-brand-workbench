@@ -40,7 +40,7 @@ The verification script checks:
   - `api`
   - `worker`
   - `web`
-  - `nginx`
+  - `nginx` or `gateway`
 - Health endpoints respond:
   - Gateway `/health`
   - Web `/api/health`
@@ -103,6 +103,16 @@ Backend 1 needs to provide these fields from the business database before callin
 
 Frontend should receive short-lived URLs only. Persistent image/file references should use artifact IDs.
 
+Object key helpers are exported from `backend.infrastructure.storage`:
+
+- `build_artifact_object_key(project_id, stage, artifact_id, filename)`
+- `build_prefixed_artifact_object_key(prefix, artifact_id, filename)`
+- `build_temporary_artifact_prefix(project_id, scope=None)`
+
+Current Frontend 2 branch (`qianduan2`) expects result payloads to carry `preview_asset_id`
+and a separate `assetUrls` map keyed by artifact ID. Backend 1 should resolve those artifact IDs
+from the database and call `create_download_url()` before returning UI-facing result data.
+
 ## Export Service
 
 Implemented in `backend/exports/`.
@@ -131,6 +141,8 @@ Frontend 2 still needs to confirm:
 - Which stages expose export buttons
 - Which formats are shown for each stage
 - Download/status UI behavior
+- Whether preview assets are returned as `assetUrls` on every workbench payload or by a separate
+  artifact URL endpoint
 
 ## Common Failures
 
@@ -200,6 +212,9 @@ Required artifact fields:
 - object_key
 - filename
 - content_type
+
+Frontend 2 currently uses preview_asset_id + assetUrls. Please confirm whether Backend 1 will
+hydrate those URLs in the workbench response or expose a separate artifact URL endpoint.
 
 Required export contract decisions:
 - POST /exports body
