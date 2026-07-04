@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
+from zipfile import ZipFile
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,6 +34,13 @@ class SeededDirectionsProject:
     directions_run_id: str
     directions_version_id: str
     direction_ids: list[str]
+
+
+@dataclass(frozen=True)
+class SeededIpChoiceProject:
+    project_id: str
+    ip_choice_run_id: str
+    vi_version_id: str
 
 
 @pytest.fixture
@@ -143,7 +153,7 @@ async def seed_stage_version(
             version_no=1,
             schema_version=1,
             input_refs_json={},
-            output_json=build_logo_output() if stage == "LOGO" else {},
+            output_json=build_stage_output(stage),
             status="GENERATED",
         )
         session.add(version)
@@ -159,6 +169,37 @@ async def seed_logo_version(
     project_id: str,
 ) -> str:
     return await seed_stage_version(session_factory, project_id=project_id, stage="LOGO")
+
+
+async def seed_ip_choice_project(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> SeededIpChoiceProject:
+    seeded = await seed_directions_project(session_factory)
+    vi_version_id = await seed_stage_version(
+        session_factory,
+        project_id=seeded.project_id,
+        stage="VI",
+    )
+    async with session_factory() as session:
+        ip_choice_run = StageRun(
+            workflow_thread_id=str(uuid4()),
+            project_id=seeded.project_id,
+            stage="IP",
+            status="WAITING_USER",
+            idempotency_key=f"api-test-ip-choice:{seeded.project_id}",
+            input_json={
+                "vi_version_id": vi_version_id,
+                "decision_id": str(uuid4()),
+            },
+        )
+        session.add(ip_choice_run)
+        await session.flush()
+        await session.commit()
+        return SeededIpChoiceProject(
+            project_id=seeded.project_id,
+            ip_choice_run_id=ip_choice_run.id,
+            vi_version_id=vi_version_id,
+        )
 
 
 async def seed_succeeded_intake_project(
@@ -286,6 +327,70 @@ def build_logo_output() -> dict[str, object]:
                 "preview_asset_id": str(uuid4()),
             },
         ],
+    }
+
+
+def build_stage_output(stage: str) -> dict[str, object]:
+    if stage == "LOGO":
+        return build_logo_output()
+    if stage == "PROPOSAL":
+        return build_proposal_output()
+    return {}
+
+
+def build_proposal_output() -> dict[str, object]:
+    direction_asset_id = str(uuid4())
+    logo_asset_id = str(uuid4())
+    material_asset_ids = [str(uuid4()), str(uuid4())]
+    return {
+        "schema_version": 1,
+        "title": "API 契约测试品牌 品牌概念提案",
+        "narrative": "从品牌需求出发，形成方向、标识、规范与应用的一致叙事。",
+        "sections": [
+            {
+                "type": "BRIEF",
+                "title": "品牌简报",
+                "summary": "用东方茶香提供轻盈的城市片刻。",
+                "version_id": str(uuid4()),
+                "asset_ids": [],
+            },
+            {
+                "type": "DIRECTION",
+                "title": "方向 1",
+                "summary": "以东方茶叶和城市线条构建现代视觉。",
+                "version_id": str(uuid4()),
+                "asset_ids": [direction_asset_id],
+            },
+            {
+                "type": "LOGO",
+                "title": "结构字标",
+                "summary": "以清晰字形建立稳定识别。",
+                "version_id": str(uuid4()),
+                "asset_ids": [logo_asset_id],
+            },
+            {
+                "type": "VI",
+                "title": "基础视觉规范",
+                "summary": "包含色板、字体、Logo 使用规则和基础版式。",
+                "version_id": str(uuid4()),
+                "asset_ids": [logo_asset_id],
+            },
+            {
+                "type": "MATERIALS",
+                "title": "品牌应用物料",
+                "summary": "展示两个预设场景中的品牌应用。",
+                "version_id": str(uuid4()),
+                "asset_ids": material_asset_ids,
+            },
+            {
+                "type": "REVIEW_SUMMARY",
+                "title": "审稿摘要",
+                "summary": "所有已确认阶段的结构、约束和资产引用已完成检查。",
+                "version_id": str(uuid4()),
+                "asset_ids": [],
+            },
+        ],
+        "asset_refs": [direction_asset_id, logo_asset_id, *material_asset_ids],
     }
 
 
@@ -475,25 +580,79 @@ def test_create_stage_decision_invalid_stage_returns_422(api_client) -> None:
     assert response.json() == {"detail": "Invalid stage key: nope"}
 
 
-def test_create_stage_decision_unsupported_stage_returns_409(api_client) -> None:
+def test_create_logo_stage_decision_dispatches_vi_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    request_payload = {
+        "version_id": logo_version_id,
+        "selected_item_id": "logo-wordmark",
+    }
+
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
+        json=request_payload,
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
+        json=request_payload,
+    )
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload["stage_run"]["stage"] == "VI"
+    assert first_payload["decision"]["stage"] == "LOGO"
+    assert first_payload["decision"]["selected_item_id"] == "logo-wordmark"
+    assert repeated_payload["stage_run"]["id"] == first_payload["stage_run"]["id"]
+    assert repeated_payload["decision"]["id"] == first_payload["decision"]["id"]
+    assert dispatched_stage_run_ids == [first_payload["stage_run"]["id"]]
+
+
+def test_create_logo_stage_decision_conflicting_selection_returns_409(
+    api_client,
+    monkeypatch,
+) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
     logo_version_id = asyncio.run(
         seed_logo_version(session_factory, project_id=seeded.project_id),
     )
 
-    response = client.post(
-        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
-        json={
-            "version_id": logo_version_id,
-            "selected_item_id": "logo-wordmark",
-        },
-    )
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    endpoint = f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions"
+    first_payload = {
+        "version_id": logo_version_id,
+        "selected_item_id": "logo-wordmark",
+    }
+    conflicting_payload = {
+        "version_id": logo_version_id,
+        "selected_item_id": "logo-symbol",
+    }
+
+    assert client.post(endpoint, json=first_payload).status_code == 202
+    response = client.post(endpoint, json=conflicting_payload)
 
     assert response.status_code == 409
-    assert response.json() == {
-        "detail": "LOGO SELECT_VERSION decisions are not supported by this worker milestone",
-    }
+    assert response.json() == {"detail": "This Logo version already has another selection"}
 
 
 def test_create_stage_decision_invalid_logo_selection_returns_409(api_client) -> None:
@@ -517,7 +676,471 @@ def test_create_stage_decision_invalid_logo_selection_returns_409(api_client) ->
     }
 
 
-def test_create_stage_decision_confirm_version_skeleton_returns_409(api_client) -> None:
+def test_create_logo_stage_decision_confirm_version_skeleton_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
+        json={
+            "version_id": logo_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "LOGO CONFIRM_VERSION decisions are not supported by this worker milestone",
+    }
+
+
+def test_confirm_vi_stage_decision_dispatches_ip_choice_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    vi_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="VI",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    request_payload = {
+        "version_id": vi_version_id,
+        "action": "CONFIRM_VERSION",
+        "confirmed": True,
+    }
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/vi/decisions",
+        json=request_payload,
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/vi/decisions",
+        json=request_payload,
+    )
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload["stage_run"]["stage"] == "IP"
+    assert first_payload["stage_run"]["status"] == "QUEUED"
+    assert first_payload["decision"]["stage"] == "VI"
+    assert first_payload["decision"]["action"] == "CONFIRM_VERSION"
+    assert first_payload["decision"]["selected_item_id"] is None
+    assert repeated_payload["stage_run"]["id"] == first_payload["stage_run"]["id"]
+    assert repeated_payload["decision"]["id"] == first_payload["decision"]["id"]
+    assert dispatched_stage_run_ids == [first_payload["stage_run"]["id"]]
+
+
+def test_confirm_ip_stage_decision_dispatches_materials_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    ip_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="IP",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    request_payload = {
+        "version_id": ip_version_id,
+        "action": "CONFIRM_VERSION",
+        "confirmed": True,
+    }
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/decisions",
+        json=request_payload,
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/decisions",
+        json=request_payload,
+    )
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload["stage_run"]["stage"] == "MATERIALS"
+    assert first_payload["stage_run"]["status"] == "QUEUED"
+    assert first_payload["decision"]["stage"] == "IP"
+    assert first_payload["decision"]["action"] == "CONFIRM_VERSION"
+    assert first_payload["decision"]["selected_item_id"] is None
+    assert repeated_payload["stage_run"]["id"] == first_payload["stage_run"]["id"]
+    assert repeated_payload["decision"]["id"] == first_payload["decision"]["id"]
+    assert dispatched_stage_run_ids == [first_payload["stage_run"]["id"]]
+
+
+def test_confirm_materials_stage_decision_dispatches_review_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    materials_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="MATERIALS",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    request_payload = {
+        "version_id": materials_version_id,
+        "action": "CONFIRM_VERSION",
+        "confirmed": True,
+    }
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/materials/decisions",
+        json=request_payload,
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/materials/decisions",
+        json=request_payload,
+    )
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload["stage_run"]["stage"] == "REVIEW"
+    assert first_payload["stage_run"]["status"] == "QUEUED"
+    assert first_payload["decision"]["stage"] == "MATERIALS"
+    assert first_payload["decision"]["action"] == "CONFIRM_VERSION"
+    assert first_payload["decision"]["selected_item_id"] is None
+    assert repeated_payload["stage_run"]["id"] == first_payload["stage_run"]["id"]
+    assert repeated_payload["decision"]["id"] == first_payload["decision"]["id"]
+    assert dispatched_stage_run_ids == [first_payload["stage_run"]["id"]]
+
+
+def test_confirm_review_stage_decision_dispatches_proposal_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    review_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="REVIEW",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    request_payload = {
+        "version_id": review_version_id,
+        "action": "CONFIRM_VERSION",
+        "confirmed": True,
+    }
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/review/decisions",
+        json=request_payload,
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/review/decisions",
+        json=request_payload,
+    )
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload["stage_run"]["stage"] == "PROPOSAL"
+    assert first_payload["stage_run"]["status"] == "QUEUED"
+    assert first_payload["decision"]["stage"] == "REVIEW"
+    assert first_payload["decision"]["action"] == "CONFIRM_VERSION"
+    assert first_payload["decision"]["selected_item_id"] is None
+    assert repeated_payload["stage_run"]["id"] == first_payload["stage_run"]["id"]
+    assert repeated_payload["decision"]["id"] == first_payload["decision"]["id"]
+    assert dispatched_stage_run_ids == [first_payload["stage_run"]["id"]]
+
+
+def test_confirm_proposal_stage_decision_completes_project_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    proposal_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", dispatched_stage_run_ids.append)
+
+    request_payload = {
+        "version_id": proposal_version_id,
+        "action": "CONFIRM_VERSION",
+        "confirmed": True,
+    }
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/proposal/decisions",
+        json=request_payload,
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/proposal/decisions",
+        json=request_payload,
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload["stage_run"]["stage"] == "PROPOSAL"
+    assert first_payload["stage_run"]["status"] == "SUCCEEDED"
+    assert first_payload["stage_run"]["result_version_id"] == proposal_version_id
+    assert first_payload["decision"]["stage"] == "PROPOSAL"
+    assert first_payload["decision"]["action"] == "CONFIRM_VERSION"
+    assert first_payload["decision"]["selected_item_id"] is None
+    assert repeated_payload["stage_run"]["id"] == first_payload["stage_run"]["id"]
+    assert repeated_payload["decision"]["id"] == first_payload["decision"]["id"]
+    assert dispatched_stage_run_ids == []
+
+    state_payload = state_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["project"]["status"] == "COMPLETED"
+    assert state_payload["current_stage"] == "PROPOSAL"
+    assert state_payload["stage_runs"]["PROPOSAL"]["id"] == first_payload["stage_run"]["id"]
+    assert state_payload["stage_runs"]["PROPOSAL"]["status"] == "SUCCEEDED"
+    assert state_payload["versions"]["PROPOSAL"]["id"] == proposal_version_id
+
+
+def test_get_proposal_export_manifest_returns_completed_project_manifest(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    proposal_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", dispatched_stage_run_ids.append)
+
+    completion_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/proposal/decisions",
+        json={
+            "version_id": proposal_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    manifest_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/exports/proposal-manifest",
+    )
+
+    assert completion_response.status_code == 202
+    assert dispatched_stage_run_ids == []
+    manifest_payload = manifest_response.json()
+    assert manifest_response.status_code == 200
+    assert manifest_payload["project_id"] == seeded.project_id
+    assert manifest_payload["project_name"] == "API 契约测试品牌"
+    assert manifest_payload["proposal_version_id"] == proposal_version_id
+    assert manifest_payload["decision_id"] == completion_response.json()["decision"]["id"]
+    assert manifest_payload["title"] == "API 契约测试品牌 品牌概念提案"
+    assert [section["type"] for section in manifest_payload["sections"]] == [
+        "BRIEF",
+        "DIRECTION",
+        "LOGO",
+        "VI",
+        "MATERIALS",
+        "REVIEW_SUMMARY",
+    ]
+    assert len(manifest_payload["asset_refs"]) == 4
+
+
+def test_download_proposal_markdown_returns_completed_project_file(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    proposal_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    completion_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/proposal/decisions",
+        json={
+            "version_id": proposal_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    download_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/exports/proposal.md",
+    )
+
+    assert completion_response.status_code == 202
+    assert download_response.status_code == 200
+    assert download_response.headers["content-type"].startswith("text/markdown")
+    assert download_response.headers["content-disposition"] == (
+        f'attachment; filename="proposal-{seeded.project_id}.md"'
+    )
+    assert "# API 契约测试品牌 品牌概念提案" in download_response.text
+    assert "## Export Metadata" in download_response.text
+    assert f"- Proposal version: `{proposal_version_id}`" in download_response.text
+    assert "### 品牌简报" in download_response.text
+    assert "## Asset References" in download_response.text
+
+
+def test_download_proposal_zip_returns_completed_project_bundle(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    proposal_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    completion_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/proposal/decisions",
+        json={
+            "version_id": proposal_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    bundle_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/exports/proposal.zip",
+    )
+
+    assert completion_response.status_code == 202
+    assert bundle_response.status_code == 200
+    assert bundle_response.headers["content-type"].startswith("application/zip")
+    assert bundle_response.headers["content-disposition"] == (
+        f'attachment; filename="proposal-{seeded.project_id}.zip"'
+    )
+    with ZipFile(io.BytesIO(bundle_response.content)) as bundle:
+        assert bundle.namelist() == ["proposal.md", "proposal-manifest.json"]
+        markdown = bundle.read("proposal.md").decode("utf-8")
+        manifest_payload = json.loads(bundle.read("proposal-manifest.json"))
+
+    assert "# API 契约测试品牌 品牌概念提案" in markdown
+    assert manifest_payload["project_id"] == seeded.project_id
+    assert manifest_payload["proposal_version_id"] == proposal_version_id
+    assert manifest_payload["asset_refs"]
+
+
+def test_get_proposal_export_manifest_requires_completed_project(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/exports/proposal-manifest",
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Project is not completed"}
+
+
+def test_confirm_stage_decision_foreign_version_returns_404(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    other_project = asyncio.run(seed_directions_project(session_factory))
+    other_vi_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=other_project.project_id,
+            stage="VI",
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/vi/decisions",
+        json={
+            "version_id": other_vi_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Stage version not found"}
+
+
+def test_confirm_stage_decision_mismatched_stage_returns_409(api_client) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
     vi_version_id = asyncio.run(
@@ -529,7 +1152,7 @@ def test_create_stage_decision_confirm_version_skeleton_returns_409(api_client) 
     )
 
     response = client.post(
-        f"/api/v1/projects/{seeded.project_id}/stages/vi/decisions",
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
         json={
             "version_id": vi_version_id,
             "action": "CONFIRM_VERSION",
@@ -539,7 +1162,7 @@ def test_create_stage_decision_confirm_version_skeleton_returns_409(api_client) 
 
     assert response.status_code == 409
     assert response.json() == {
-        "detail": "VI CONFIRM_VERSION decisions are not supported by this worker milestone",
+        "detail": "Stage version does not belong to requested stage",
     }
 
 
@@ -623,6 +1246,256 @@ def test_stage_decision_exposes_stale_downstream_versions(
     assert logo_versions_response.status_code == 200
     assert logo_versions_payload[0]["id"] == stale_logo_version_id
     assert logo_versions_payload[0]["status"] == "STALE"
+
+
+def test_logo_stage_decision_exposes_stale_downstream_versions(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+    stale_vi_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="VI",
+        ),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    decision_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/decisions",
+        json={
+            "version_id": logo_version_id,
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+    vi_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/vi/versions",
+    )
+
+    assert decision_response.status_code == 202
+    state_payload = state_response.json()
+    vi_versions_payload = vi_versions_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["current_stage"] == "VI"
+    assert state_payload["stage_runs"]["VI"]["status"] == "QUEUED"
+    assert state_payload["versions"]["VI"]["id"] == stale_vi_version_id
+    assert state_payload["versions"]["VI"]["status"] == "STALE"
+    assert vi_versions_response.status_code == 200
+    assert vi_versions_payload[0]["id"] == stale_vi_version_id
+    assert vi_versions_payload[0]["status"] == "STALE"
+
+
+def test_vi_stage_decision_exposes_stale_downstream_versions(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    vi_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="VI",
+        ),
+    )
+    stale_ip_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="IP",
+        ),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    decision_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/vi/decisions",
+        json={
+            "version_id": vi_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+    ip_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/versions",
+    )
+
+    assert decision_response.status_code == 202
+    state_payload = state_response.json()
+    ip_versions_payload = ip_versions_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["current_stage"] == "IP"
+    assert state_payload["stage_runs"]["IP"]["status"] == "QUEUED"
+    assert state_payload["versions"]["IP"]["id"] == stale_ip_version_id
+    assert state_payload["versions"]["IP"]["status"] == "STALE"
+    assert ip_versions_response.status_code == 200
+    assert ip_versions_payload[0]["id"] == stale_ip_version_id
+    assert ip_versions_payload[0]["status"] == "STALE"
+
+
+def test_ip_stage_decision_exposes_stale_downstream_versions(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    ip_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="IP",
+        ),
+    )
+    stale_materials_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="MATERIALS",
+        ),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    decision_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/decisions",
+        json={
+            "version_id": ip_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+    materials_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/materials/versions",
+    )
+
+    assert decision_response.status_code == 202
+    state_payload = state_response.json()
+    materials_versions_payload = materials_versions_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["current_stage"] == "MATERIALS"
+    assert state_payload["stage_runs"]["MATERIALS"]["status"] == "QUEUED"
+    assert state_payload["versions"]["MATERIALS"]["id"] == stale_materials_version_id
+    assert state_payload["versions"]["MATERIALS"]["status"] == "STALE"
+    assert materials_versions_response.status_code == 200
+    assert materials_versions_payload[0]["id"] == stale_materials_version_id
+    assert materials_versions_payload[0]["status"] == "STALE"
+
+
+def test_materials_stage_decision_exposes_stale_downstream_versions(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    materials_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="MATERIALS",
+        ),
+    )
+    stale_review_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="REVIEW",
+        ),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    decision_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/materials/decisions",
+        json={
+            "version_id": materials_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+    review_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/review/versions",
+    )
+
+    assert decision_response.status_code == 202
+    state_payload = state_response.json()
+    review_versions_payload = review_versions_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["current_stage"] == "REVIEW"
+    assert state_payload["stage_runs"]["REVIEW"]["status"] == "QUEUED"
+    assert state_payload["versions"]["REVIEW"]["id"] == stale_review_version_id
+    assert state_payload["versions"]["REVIEW"]["status"] == "STALE"
+    assert review_versions_response.status_code == 200
+    assert review_versions_payload[0]["id"] == stale_review_version_id
+    assert review_versions_payload[0]["status"] == "STALE"
+
+
+def test_review_stage_decision_exposes_stale_downstream_versions(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    review_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="REVIEW",
+        ),
+    )
+    stale_proposal_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    decision_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/review/decisions",
+        json={
+            "version_id": review_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+    proposal_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/proposal/versions",
+    )
+
+    assert decision_response.status_code == 202
+    state_payload = state_response.json()
+    proposal_versions_payload = proposal_versions_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["current_stage"] == "PROPOSAL"
+    assert state_payload["stage_runs"]["PROPOSAL"]["status"] == "QUEUED"
+    assert state_payload["versions"]["PROPOSAL"]["id"] == stale_proposal_version_id
+    assert state_payload["versions"]["PROPOSAL"]["status"] == "STALE"
+    assert proposal_versions_response.status_code == 200
+    assert proposal_versions_payload[0]["id"] == stale_proposal_version_id
+    assert proposal_versions_payload[0]["status"] == "STALE"
 
 
 def test_intake_answers_dispatches_directions_run(api_client, monkeypatch) -> None:
@@ -767,7 +1640,7 @@ def test_legacy_direction_selection_conflicting_selection_returns_409(
     }
 
 
-@pytest.mark.parametrize("action", ["redo", "skip"])
+@pytest.mark.parametrize("action", ["redo", "skip", "generate"])
 def test_stage_control_missing_project_returns_404(api_client, action: str) -> None:
     client, _ = api_client
 
@@ -777,7 +1650,7 @@ def test_stage_control_missing_project_returns_404(api_client, action: str) -> N
     assert response.json() == {"detail": "Project not found"}
 
 
-@pytest.mark.parametrize("action", ["redo", "skip"])
+@pytest.mark.parametrize("action", ["redo", "skip", "generate"])
 def test_stage_control_invalid_stage_returns_422(api_client, action: str) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
@@ -789,38 +1662,430 @@ def test_stage_control_invalid_stage_returns_422(api_client, action: str) -> Non
 
 
 @pytest.mark.parametrize(
-    ("action", "expected_detail"),
+    ("stage_key", "stage"),
     [
-        ("redo", "REDO is not supported by this worker milestone for DIRECTIONS"),
-        ("skip", "SKIP is not supported by this worker milestone for DIRECTIONS"),
+        ("intake", "INTAKE"),
+        ("directions", "DIRECTIONS"),
+        ("logo", "LOGO"),
+        ("vi", "VI"),
+        ("ip", "IP"),
+        ("materials", "MATERIALS"),
+        ("review", "REVIEW"),
+        ("proposal", "PROPOSAL"),
     ],
 )
+@pytest.mark.parametrize("action", ["skip", "generate"])
 def test_stage_control_supported_stage_returns_current_milestone_error(
     api_client,
+    stage_key: str,
+    stage: str,
     action: str,
-    expected_detail: str,
 ) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
+    source_version_id = (
+        seeded.directions_version_id
+        if stage == "DIRECTIONS"
+        else asyncio.run(
+            seed_stage_version(
+                session_factory,
+                project_id=seeded.project_id,
+                stage=stage,
+            ),
+        )
+    )
 
     response = client.post(
-        f"/api/v1/projects/{seeded.project_id}/stages/directions/{action}",
+        f"/api/v1/projects/{seeded.project_id}/stages/{stage_key}/{action}",
         json={
-            "source_version_id": seeded.directions_version_id,
+            "source_version_id": source_version_id,
             "reason": "try another option",
         },
     )
 
     assert response.status_code == 409
+    expected_detail = (
+        "IP skip does not accept source_version_id"
+        if stage == "IP" and action == "skip"
+        else "IP generate does not accept source_version_id"
+        if stage == "IP" and action == "generate"
+        else f"{action.upper()} is not supported by this worker milestone for {stage}"
+    )
     assert response.json() == {"detail": expected_detail}
 
 
-def test_stage_control_missing_source_version_returns_404(api_client) -> None:
+def test_stage_redo_requires_source_version(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(f"/api/v1/projects/{seeded.project_id}/stages/directions/redo")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "REDO requires source_version_id"}
+
+
+@pytest.mark.parametrize(
+    ("stage_key", "stage"),
+    [
+        ("logo", "LOGO"),
+        ("vi", "VI"),
+        ("ip", "IP"),
+        ("materials", "MATERIALS"),
+        ("review", "REVIEW"),
+        ("proposal", "PROPOSAL"),
+    ],
+)
+def test_stage_redo_later_stages_returns_current_milestone_error(
+    api_client,
+    stage_key: str,
+    stage: str,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    source_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage=stage,
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/{stage_key}/redo",
+        json={
+            "source_version_id": source_version_id,
+            "reason": "try another output",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": f"REDO is not supported by this worker milestone for {stage}",
+    }
+
+
+def test_intake_redo_dispatches_new_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_succeeded_intake_project(session_factory))
+    stale_directions_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="DIRECTIONS",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/intake/redo",
+        json={
+            "source_version_id": seeded.intake_version_id,
+            "reason": "intake answers changed",
+        },
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/intake/redo",
+        json={
+            "source_version_id": seeded.intake_version_id,
+            "reason": "intake answers changed",
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+    intake_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/intake/versions",
+    )
+    directions_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/versions",
+    )
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload == {
+        "project_id": seeded.project_id,
+        "stage": "INTAKE",
+        "action": "REDO",
+        "status": "QUEUED",
+    }
+    assert repeated_payload == first_payload
+
+    state_payload = state_response.json()
+    assert state_response.status_code == 200
+    assert dispatched_stage_run_ids == [state_payload["stage_runs"]["INTAKE"]["id"]]
+    assert state_payload["current_stage"] == "INTAKE"
+    assert state_payload["project"]["status"] == "ACTIVE"
+    assert state_payload["stage_runs"]["INTAKE"]["status"] == "QUEUED"
+    assert state_payload["versions"]["INTAKE"]["id"] == seeded.intake_version_id
+    assert state_payload["versions"]["INTAKE"]["status"] == "STALE"
+    assert state_payload["versions"]["DIRECTIONS"]["id"] == stale_directions_version_id
+    assert state_payload["versions"]["DIRECTIONS"]["status"] == "STALE"
+    assert state_payload["decisions"][0]["stage"] == "INTAKE"
+    assert state_payload["decisions"][0]["action"] == "REDO"
+    assert state_payload["decisions"][0]["source_version_id"] == seeded.intake_version_id
+    assert state_payload["decisions"][0]["payload"] == {
+        "source_version_id": seeded.intake_version_id,
+        "reason": "intake answers changed",
+    }
+
+    intake_versions_payload = intake_versions_response.json()
+    directions_versions_payload = directions_versions_response.json()
+    assert intake_versions_response.status_code == 200
+    assert intake_versions_payload[0]["id"] == seeded.intake_version_id
+    assert intake_versions_payload[0]["status"] == "STALE"
+    assert directions_versions_response.status_code == 200
+    assert directions_versions_payload[0]["id"] == stale_directions_version_id
+    assert directions_versions_payload[0]["status"] == "STALE"
+
+
+def test_directions_redo_dispatches_new_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    stale_logo_version_id = asyncio.run(
+        seed_logo_version(session_factory, project_id=seeded.project_id),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/redo",
+        json={
+            "source_version_id": seeded.directions_version_id,
+            "reason": "directions need another pass",
+        },
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/redo",
+        json={
+            "source_version_id": seeded.directions_version_id,
+            "reason": "directions need another pass",
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+    directions_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/versions",
+    )
+    logo_versions_response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/stages/logo/versions",
+    )
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload == {
+        "project_id": seeded.project_id,
+        "stage": "DIRECTIONS",
+        "action": "REDO",
+        "status": "QUEUED",
+    }
+    assert repeated_payload == first_payload
+
+    state_payload = state_response.json()
+    assert state_response.status_code == 200
+    assert dispatched_stage_run_ids == [state_payload["stage_runs"]["DIRECTIONS"]["id"]]
+    assert state_payload["current_stage"] == "DIRECTIONS"
+    assert state_payload["project"]["status"] == "ACTIVE"
+    assert state_payload["stage_runs"]["DIRECTIONS"]["status"] == "QUEUED"
+    assert state_payload["versions"]["DIRECTIONS"]["id"] == seeded.directions_version_id
+    assert state_payload["versions"]["DIRECTIONS"]["status"] == "STALE"
+    assert state_payload["versions"]["LOGO"]["id"] == stale_logo_version_id
+    assert state_payload["versions"]["LOGO"]["status"] == "STALE"
+    assert state_payload["decisions"][0]["stage"] == "DIRECTIONS"
+    assert state_payload["decisions"][0]["action"] == "REDO"
+    assert state_payload["decisions"][0]["source_version_id"] == seeded.directions_version_id
+    assert state_payload["decisions"][0]["payload"] == {
+        "source_version_id": seeded.directions_version_id,
+        "reason": "directions need another pass",
+    }
+
+    directions_versions_payload = directions_versions_response.json()
+    logo_versions_payload = logo_versions_response.json()
+    assert directions_versions_response.status_code == 200
+    assert directions_versions_payload[0]["id"] == seeded.directions_version_id
+    assert directions_versions_payload[0]["status"] == "STALE"
+    assert logo_versions_response.status_code == 200
+    assert logo_versions_payload[0]["id"] == stale_logo_version_id
+    assert logo_versions_payload[0]["status"] == "STALE"
+
+
+def test_ip_skip_dispatches_materials_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_ip_choice_project(session_factory))
+    stale_materials_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="MATERIALS",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/skip",
+        json={"reason": "no mascot needed"},
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/skip",
+        json={"reason": "no mascot needed"},
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload == {
+        "project_id": seeded.project_id,
+        "stage": "MATERIALS",
+        "action": "SKIP",
+        "status": "QUEUED",
+    }
+    assert repeated_payload == first_payload
+    assert dispatched_stage_run_ids == [state_response.json()["stage_runs"]["MATERIALS"]["id"]]
+
+    state_payload = state_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["current_stage"] == "MATERIALS"
+    assert state_payload["stage_runs"]["IP"]["status"] == "WAITING_USER"
+    assert state_payload["stage_runs"]["MATERIALS"]["status"] == "QUEUED"
+    assert state_payload["versions"]["MATERIALS"]["id"] == stale_materials_version_id
+    assert state_payload["versions"]["MATERIALS"]["status"] == "STALE"
+    assert state_payload["decisions"][0]["stage"] == "IP"
+    assert state_payload["decisions"][0]["action"] == "SKIP"
+    assert state_payload["decisions"][0]["source_version_id"] == seeded.vi_version_id
+
+
+def test_ip_skip_without_waiting_choice_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(f"/api/v1/projects/{seeded.project_id}/stages/ip/skip")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "No waiting IP choice found"}
+
+
+def test_ip_generate_dispatches_ip_run_and_is_idempotent(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_ip_choice_project(session_factory))
+    stale_ip_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="IP",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    def fake_delay(stage_run_id: str) -> None:
+        dispatched_stage_run_ids.append(stage_run_id)
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", fake_delay)
+
+    first_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/generate",
+        json={"reason": "mascot will help the brand"},
+    )
+    repeated_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/generate",
+        json={"reason": "mascot will help the brand"},
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+
+    assert first_response.status_code == 202
+    assert repeated_response.status_code == 202
+    first_payload = first_response.json()
+    repeated_payload = repeated_response.json()
+    assert first_payload == {
+        "project_id": seeded.project_id,
+        "stage": "IP",
+        "action": "GENERATE",
+        "status": "QUEUED",
+    }
+    assert repeated_payload == first_payload
+    assert dispatched_stage_run_ids == [state_response.json()["stage_runs"]["IP"]["id"]]
+
+    state_payload = state_response.json()
+    assert state_response.status_code == 200
+    assert state_payload["current_stage"] == "IP"
+    assert state_payload["stage_runs"]["IP"]["status"] == "QUEUED"
+    assert state_payload["versions"]["IP"]["id"] == stale_ip_version_id
+    assert state_payload["versions"]["IP"]["status"] == "STALE"
+    assert state_payload["decisions"][0]["stage"] == "IP"
+    assert state_payload["decisions"][0]["action"] == "GENERATE"
+    assert state_payload["decisions"][0]["source_version_id"] == seeded.vi_version_id
+
+
+def test_ip_generate_without_waiting_choice_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(f"/api/v1/projects/{seeded.project_id}/stages/ip/generate")
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "No waiting IP choice found"}
+
+
+def test_ip_generate_after_skip_returns_409(api_client, monkeypatch) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_ip_choice_project(session_factory))
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    skip_response = client.post(f"/api/v1/projects/{seeded.project_id}/stages/ip/skip")
+    generate_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/ip/generate",
+    )
+
+    assert skip_response.status_code == 202
+    assert generate_response.status_code == 409
+    assert generate_response.json() == {"detail": "IP choice already has another action"}
+
+
+@pytest.mark.parametrize("action", ["redo", "skip", "generate"])
+def test_stage_control_missing_source_version_returns_404(api_client, action: str) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
 
     response = client.post(
-        f"/api/v1/projects/{seeded.project_id}/stages/directions/redo",
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/{action}",
         json={
             "source_version_id": str(uuid4()),
             "reason": "version disappeared",
@@ -831,7 +2096,29 @@ def test_stage_control_missing_source_version_returns_404(api_client) -> None:
     assert response.json() == {"detail": "Stage version not found"}
 
 
-def test_stage_control_mismatched_source_version_returns_409(api_client) -> None:
+@pytest.mark.parametrize("action", ["redo", "skip", "generate"])
+def test_stage_control_foreign_source_version_returns_404(api_client, action: str) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    other_project = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/{action}",
+        json={
+            "source_version_id": other_project.directions_version_id,
+            "reason": "wrong project",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Stage version not found"}
+
+
+@pytest.mark.parametrize("action", ["redo", "skip", "generate"])
+def test_stage_control_mismatched_source_version_returns_409(
+    api_client,
+    action: str,
+) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
     logo_version_id = asyncio.run(
@@ -839,7 +2126,7 @@ def test_stage_control_mismatched_source_version_returns_409(api_client) -> None
     )
 
     response = client.post(
-        f"/api/v1/projects/{seeded.project_id}/stages/directions/skip",
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/{action}",
         json={
             "source_version_id": logo_version_id,
             "reason": "wrong stage",

@@ -5,14 +5,21 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from backend.agents.schemas.directions import DirectionOutput
 from backend.agents.schemas.intake import IntakeResumePayload
+from backend.agents.schemas.ip import IPOutput
 from backend.agents.schemas.logo import LogoOutput
+from backend.agents.schemas.materials import MaterialOutput
+from backend.agents.schemas.proposal import ProposalOutput
+from backend.agents.schemas.review import ReviewOutput
+from backend.agents.schemas.vi import VIOutput
 from backend.agents.testing import InMemoryArtifactWriter
 from backend.agents.workflow import build_brand_workflow
+from backend.application.exports import get_proposal_export_manifest, render_proposal_markdown
 from backend.application.projects import (
     CreateProjectCommand,
     create_project,
@@ -20,6 +27,7 @@ from backend.application.projects import (
     get_project_state,
     list_projects,
     list_stage_versions,
+    request_stage_control,
 )
 from backend.application.stage_runs import (
     create_intake_resume_run,
@@ -345,7 +353,7 @@ async def test_intake_answers_resume_checkpoint_and_generate_directions(session)
 
 
 @pytest.mark.asyncio
-async def test_direction_selection_resumes_checkpoint_and_generates_logo(session) -> None:
+async def test_stage_selections_resume_checkpoint_and_generate_logo_then_vi(session) -> None:
     project, intake_run, _ = await create_project(
         session,
         CreateProjectCommand(
@@ -496,6 +504,387 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
     }
     assert project.current_stage == "LOGO"
 
+    selected_logo_id = logo_output.concepts[0].id
+    vi_run, logo_decision, vi_event = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="logo",
+        version_id=logo_version.id,
+        selected_item_id=selected_logo_id,
+    )
+    repeated_vi_run, repeated_logo_decision, repeated_vi_event = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="logo",
+        version_id=logo_version.id,
+        selected_item_id=selected_logo_id,
+    )
+
+    assert vi_event is not None
+    assert repeated_vi_event is None
+    assert repeated_vi_run.id == vi_run.id
+    assert repeated_logo_decision.id == logo_decision.id
+    assert vi_run.stage == "VI"
+    assert vi_run.parent_stage_run_id == logo_run.id
+    assert vi_run.workflow_thread_id == intake_run.workflow_thread_id
+    assert logo_decision.stage == "LOGO"
+    assert logo_decision.source_version_id == logo_version.id
+    assert logo_decision.selected_item_id == selected_logo_id
+    assert await session.scalar(select(func.count()).select_from(Decision)) == 2
+    assert project.current_stage == "VI"
+
+    vi_recorder = SqlAlchemyInvocationRecorder(session, stage_run_id=vi_run.id)
+    vi_workflow = build_brand_workflow(
+        text_provider=FakeTextModelProvider(),
+        image_provider=FakeImageModelProvider(),
+        artifact_writer=InMemoryArtifactWriter(),
+        invocation_recorder=vi_recorder,
+        checkpointer=checkpointer,
+    )
+    completed_vi = await execute_stage_run(
+        session,
+        stage_run_id=vi_run.id,
+        workflow=vi_workflow,
+        invocation_recorder=vi_recorder,
+    )
+    vi_version = await session.get(StageVersion, completed_vi.result_version_id)
+    vi_output = VIOutput.model_validate(vi_version.output_json)
+
+    assert completed_vi.status == "SUCCEEDED"
+    assert vi_output.source_logo_asset_id == logo_output.concepts[0].preview_asset_id
+    assert vi_version.input_refs_json == {
+        "brand_spec_version": 2,
+        "logo_version_id": logo_version.id,
+        "decision_id": logo_decision.id,
+    }
+    assert project.current_stage == "VI"
+
+    ip_choice_run, vi_decision, ip_choice_event = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="vi",
+        version_id=vi_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+    (
+        repeated_ip_choice_run,
+        repeated_vi_decision,
+        repeated_ip_choice_event,
+    ) = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="vi",
+        version_id=vi_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+
+    assert ip_choice_event is not None
+    assert repeated_ip_choice_event is None
+    assert repeated_ip_choice_run.id == ip_choice_run.id
+    assert repeated_vi_decision.id == vi_decision.id
+    assert ip_choice_run.stage == "IP"
+    assert ip_choice_run.status == "QUEUED"
+    assert ip_choice_run.parent_stage_run_id == vi_run.id
+    assert vi_decision.stage == "VI"
+    assert vi_decision.action == "CONFIRM_VERSION"
+    assert vi_decision.source_version_id == vi_version.id
+    assert vi_decision.selected_item_id is None
+    assert await session.scalar(select(func.count()).select_from(Decision)) == 3
+    assert project.current_stage == "IP"
+
+    ip_choice_recorder = SqlAlchemyInvocationRecorder(
+        session,
+        stage_run_id=ip_choice_run.id,
+    )
+    ip_choice_workflow = build_brand_workflow(
+        text_provider=FakeTextModelProvider(),
+        image_provider=FakeImageModelProvider(),
+        artifact_writer=InMemoryArtifactWriter(),
+        invocation_recorder=ip_choice_recorder,
+        checkpointer=checkpointer,
+    )
+    completed_ip_choice = await execute_stage_run(
+        session,
+        stage_run_id=ip_choice_run.id,
+        workflow=ip_choice_workflow,
+        invocation_recorder=ip_choice_recorder,
+    )
+
+    assert completed_ip_choice.status == "WAITING_USER"
+    assert completed_ip_choice.result_version_id is None
+    assert project.current_stage == "IP"
+
+    materials_run_result = await request_stage_control(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="ip",
+        action="SKIP",
+        reason="no mascot needed",
+    )
+    repeated_materials_run_result = await request_stage_control(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="ip",
+        action="SKIP",
+        reason="no mascot needed",
+    )
+
+    assert materials_run_result.stage == "MATERIALS"
+    assert materials_run_result.status == "QUEUED"
+    assert materials_run_result.outbox_event is not None
+    assert repeated_materials_run_result.stage == "MATERIALS"
+    assert repeated_materials_run_result.status == "QUEUED"
+    assert repeated_materials_run_result.outbox_event is None
+    assert project.current_stage == "MATERIALS"
+
+    materials_run_id = materials_run_result.outbox_event.payload_json["stage_run_id"]
+    materials_recorder = SqlAlchemyInvocationRecorder(
+        session,
+        stage_run_id=materials_run_id,
+    )
+    materials_artifacts = InMemoryArtifactWriter()
+    materials_workflow = build_brand_workflow(
+        text_provider=FakeTextModelProvider(),
+        image_provider=FakeImageModelProvider(),
+        artifact_writer=materials_artifacts,
+        invocation_recorder=materials_recorder,
+        checkpointer=checkpointer,
+    )
+    completed_materials = await execute_stage_run(
+        session,
+        stage_run_id=materials_run_id,
+        workflow=materials_workflow,
+        invocation_recorder=materials_recorder,
+    )
+    materials_version = await session.get(StageVersion, completed_materials.result_version_id)
+    materials_output = MaterialOutput.model_validate(materials_version.output_json)
+    ip_skip_decision = await session.scalar(
+        select(Decision).where(
+            Decision.project_id == project.id,
+            Decision.stage == "IP",
+            Decision.action == "SKIP",
+        )
+    )
+
+    assert completed_materials.status == "SUCCEEDED"
+    assert len(materials_output.scenes) == 2
+    assert len(materials_artifacts.items) == 2
+    assert ip_skip_decision is not None
+    assert ip_skip_decision.source_version_id == vi_version.id
+    assert materials_version.input_refs_json == {
+        "brand_spec_version": 2,
+        "vi_version_id": vi_version.id,
+        "decision_id": ip_skip_decision.id,
+        "ip_skipped": True,
+    }
+    assert project.current_stage == "MATERIALS"
+
+    review_run, materials_decision, review_event = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="materials",
+        version_id=materials_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+    (
+        repeated_review_run,
+        repeated_materials_decision,
+        repeated_review_event,
+    ) = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="materials",
+        version_id=materials_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+
+    assert review_event is not None
+    assert repeated_review_event is None
+    assert repeated_review_run.id == review_run.id
+    assert repeated_materials_decision.id == materials_decision.id
+    assert review_run.stage == "REVIEW"
+    assert review_run.parent_stage_run_id == completed_materials.id
+    assert materials_decision.stage == "MATERIALS"
+    assert materials_decision.action == "CONFIRM_VERSION"
+    assert materials_decision.source_version_id == materials_version.id
+    assert await session.scalar(select(func.count()).select_from(Decision)) == 5
+    assert project.current_stage == "REVIEW"
+
+    review_recorder = SqlAlchemyInvocationRecorder(session, stage_run_id=review_run.id)
+    review_workflow = build_brand_workflow(
+        text_provider=FakeTextModelProvider(),
+        image_provider=FakeImageModelProvider(),
+        artifact_writer=InMemoryArtifactWriter(),
+        invocation_recorder=review_recorder,
+        checkpointer=checkpointer,
+    )
+    completed_review = await execute_stage_run(
+        session,
+        stage_run_id=review_run.id,
+        workflow=review_workflow,
+        invocation_recorder=review_recorder,
+    )
+    review_version = await session.get(StageVersion, completed_review.result_version_id)
+    review_output = ReviewOutput.model_validate(review_version.output_json)
+
+    assert completed_review.status == "SUCCEEDED"
+    assert review_output.passed is True
+    assert review_version.output_json["pass"] is True
+    assert review_version.input_refs_json == {
+        "brand_spec_version": 2,
+        "materials_version_id": materials_version.id,
+        "decision_id": materials_decision.id,
+    }
+    assert project.current_stage == "REVIEW"
+
+    proposal_run, review_decision, proposal_event = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="review",
+        version_id=review_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+    (
+        repeated_proposal_run,
+        repeated_review_decision,
+        repeated_proposal_event,
+    ) = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="review",
+        version_id=review_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+
+    assert proposal_event is not None
+    assert repeated_proposal_event is None
+    assert repeated_proposal_run.id == proposal_run.id
+    assert repeated_review_decision.id == review_decision.id
+    assert proposal_run.stage == "PROPOSAL"
+    assert proposal_run.parent_stage_run_id == completed_review.id
+    assert review_decision.stage == "REVIEW"
+    assert review_decision.action == "CONFIRM_VERSION"
+    assert review_decision.source_version_id == review_version.id
+    assert await session.scalar(select(func.count()).select_from(Decision)) == 6
+    assert project.current_stage == "PROPOSAL"
+
+    proposal_recorder = SqlAlchemyInvocationRecorder(
+        session,
+        stage_run_id=proposal_run.id,
+    )
+    proposal_workflow = build_brand_workflow(
+        text_provider=FakeTextModelProvider(),
+        image_provider=FakeImageModelProvider(),
+        artifact_writer=InMemoryArtifactWriter(),
+        invocation_recorder=proposal_recorder,
+        checkpointer=checkpointer,
+    )
+    completed_proposal = await execute_stage_run(
+        session,
+        stage_run_id=proposal_run.id,
+        workflow=proposal_workflow,
+        invocation_recorder=proposal_recorder,
+    )
+    proposal_version = await session.get(
+        StageVersion,
+        completed_proposal.result_version_id,
+    )
+    proposal_output = ProposalOutput.model_validate(proposal_version.output_json)
+
+    assert completed_proposal.status == "SUCCEEDED"
+    assert proposal_output.title == "Logo 恢复测试品牌 品牌概念提案"
+    assert len(proposal_output.sections) == 6
+    assert len(proposal_output.asset_refs) == 4
+    assert proposal_version.input_refs_json == {
+        "brand_spec_version": 2,
+        "review_version_id": review_version.id,
+        "decision_id": review_decision.id,
+    }
+    assert project.current_stage == "PROPOSAL"
+
+    final_run, proposal_decision, final_event = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="proposal",
+        version_id=proposal_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+    (
+        repeated_final_run,
+        repeated_proposal_decision,
+        repeated_final_event,
+    ) = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="proposal",
+        version_id=proposal_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+
+    assert final_event is None
+    assert repeated_final_event is None
+    assert repeated_final_run.id == final_run.id
+    assert repeated_proposal_decision.id == proposal_decision.id
+    assert final_run.stage == "PROPOSAL"
+    assert final_run.status == "SUCCEEDED"
+    assert final_run.parent_stage_run_id == completed_proposal.id
+    assert final_run.result_version_id == proposal_version.id
+    assert proposal_decision.stage == "PROPOSAL"
+    assert proposal_decision.action == "CONFIRM_VERSION"
+    assert proposal_decision.source_version_id == proposal_version.id
+    assert await session.scalar(select(func.count()).select_from(Decision)) == 7
+    assert project.current_stage == "PROPOSAL"
+    assert project.status == "COMPLETED"
+
+    manifest = await get_proposal_export_manifest(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+    )
+
+    assert manifest.project_id == project.id
+    assert manifest.project_name == project.name
+    assert manifest.proposal_version_id == proposal_version.id
+    assert manifest.decision_id == proposal_decision.id
+    assert manifest.title == proposal_output.title
+    assert manifest.asset_refs == [str(asset_id) for asset_id in proposal_output.asset_refs]
+    markdown = render_proposal_markdown(manifest)
+    assert markdown.startswith(f"# {proposal_output.title}")
+    assert f"- Proposal version: `{proposal_version.id}`" in markdown
+    assert "## Asset References" in markdown
+
     state = await get_project_state(
         session,
         project_id=project.id,
@@ -504,15 +893,38 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
 
     assert state is not None
     assert state.project.id == project.id
-    assert state.project.current_stage == "LOGO"
+    assert state.project.current_stage == "PROPOSAL"
+    assert state.project.status == "COMPLETED"
     assert state.project.brand_spec.data_json["industry"] == "茶饮"
-    assert {run.stage for run in state.stage_runs} == {"INTAKE", "DIRECTIONS", "LOGO"}
+    assert next(run for run in state.stage_runs if run.stage == "PROPOSAL").id == final_run.id
+    assert {run.stage for run in state.stage_runs} == {
+        "INTAKE",
+        "DIRECTIONS",
+        "LOGO",
+        "VI",
+        "IP",
+        "MATERIALS",
+        "REVIEW",
+        "PROPOSAL",
+    }
     assert {version.stage for version in state.stage_versions} == {
         "INTAKE",
         "DIRECTIONS",
         "LOGO",
+        "VI",
+        "MATERIALS",
+        "REVIEW",
+        "PROPOSAL",
     }
-    assert [item.selected_item_id for item in state.decisions] == [selected_id]
+    assert [item.selected_item_id for item in state.decisions] == [
+        selected_id,
+        selected_logo_id,
+        None,
+        None,
+        None,
+        None,
+        None,
+    ]
 
     direction_versions = await list_stage_versions(
         session,
@@ -526,6 +938,36 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
         workspace_id="workspace-one",
         stage_key="logo",
     )
+    vi_versions = await list_stage_versions(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        stage_key="vi",
+    )
+    ip_versions = await list_stage_versions(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        stage_key="ip",
+    )
+    materials_versions = await list_stage_versions(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        stage_key="materials",
+    )
+    review_versions = await list_stage_versions(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        stage_key="review",
+    )
+    proposal_versions = await list_stage_versions(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        stage_key="proposal",
+    )
     hidden_versions = await list_stage_versions(
         session,
         project_id=project.id,
@@ -535,7 +977,186 @@ async def test_direction_selection_resumes_checkpoint_and_generates_logo(session
 
     assert [item.id for item in direction_versions] == [directions_version.id]
     assert [item.id for item in logo_versions] == [logo_version.id]
+    assert [item.id for item in vi_versions] == [vi_version.id]
+    assert ip_versions == []
+    assert [item.id for item in materials_versions] == [materials_version.id]
+    assert [item.id for item in review_versions] == [review_version.id]
+    assert [item.id for item in proposal_versions] == [proposal_version.id]
     assert hidden_versions is None
+
+
+@pytest.mark.asyncio
+async def test_ip_generate_run_resumes_checkpoint_and_generates_ip(session) -> None:
+    project, _, _ = await create_project(
+        session,
+        CreateProjectCommand(
+            workspace_id="workspace-one",
+            actor_id="developer-two",
+            name="IP 生成测试品牌",
+            requirement_text=None,
+            structured_fields={
+                "industry": "精品咖啡",
+                "brand_background": "面向城市通勤者的社区精品咖啡品牌。",
+                "target_audiences": ["25-35 岁城市通勤者"],
+                "style_keywords": ["现代", "自然", "克制"],
+            },
+            reference_artifact_ids=[],
+        ),
+    )
+    workflow_thread_id = str(uuid4())
+    vi_version_id = str(uuid4())
+    decision_id = str(uuid4())
+    ip_run = StageRun(
+        workflow_thread_id=workflow_thread_id,
+        project_id=project.id,
+        stage="IP",
+        status="QUEUED",
+        idempotency_key=f"generate-ip-test:{project.id}",
+        input_json={
+            "resume": {"action": "GENERATE"},
+            "decision_id": decision_id,
+            "vi_version_id": vi_version_id,
+            "ip_skipped": False,
+        },
+    )
+    session.add(ip_run)
+    await session.commit()
+
+    recorder = SqlAlchemyInvocationRecorder(session, stage_run_id=ip_run.id)
+    checkpointer = InMemorySaver()
+    artifacts = InMemoryArtifactWriter()
+    workflow = build_brand_workflow(
+        text_provider=FakeTextModelProvider(),
+        image_provider=FakeImageModelProvider(),
+        artifact_writer=artifacts,
+        invocation_recorder=recorder,
+        checkpointer=checkpointer,
+    )
+    config = {"configurable": {"thread_id": workflow_thread_id}}
+    result = workflow.invoke(
+        {
+            "project_id": project.id,
+            "brand_spec": {
+                **project.brand_spec.data_json,
+                "source_map": project.brand_spec.source_map_json,
+            },
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    assert result["__interrupt__"][0].value["kind"] == "direction_decision"
+    result = workflow.invoke(
+        Command(
+            resume={
+                "version_id": str(uuid4()),
+                "selected_item_id": "direction-clear",
+            }
+        ),
+        config=config,
+    )
+    assert result["__interrupt__"][0].value["kind"] == "logo_decision"
+    result = workflow.invoke(
+        Command(
+            resume={
+                "version_id": str(uuid4()),
+                "selected_item_id": "logo-wordmark",
+            }
+        ),
+        config=config,
+    )
+    assert result["__interrupt__"][0].value["kind"] == "vi_decision"
+    result = workflow.invoke(
+        Command(
+            resume={
+                "version_id": vi_version_id,
+                "confirmed": True,
+            }
+        ),
+        config=config,
+    )
+    assert result["__interrupt__"][0].value["kind"] == "ip_choice"
+
+    completed_ip = await execute_stage_run(
+        session,
+        stage_run_id=ip_run.id,
+        workflow=workflow,
+        invocation_recorder=recorder,
+    )
+    ip_version = await session.get(StageVersion, completed_ip.result_version_id)
+    ip_output = IPOutput.model_validate(ip_version.output_json)
+
+    assert completed_ip.status == "SUCCEEDED"
+    assert ip_output.character.name == "IP 生成测试品牌伙伴"
+    assert len(artifacts.items) >= 4
+    assert ip_version.input_refs_json == {
+        "brand_spec_version": 1,
+        "vi_version_id": vi_version_id,
+        "decision_id": decision_id,
+        "ip_skipped": False,
+    }
+    assert project.current_stage == "IP"
+
+    materials_run, ip_decision, event = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="ip",
+        version_id=ip_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+    repeated_materials_run, repeated_ip_decision, repeated_event = await create_stage_decision(
+        session,
+        project_id=project.id,
+        workspace_id="workspace-one",
+        actor_id="developer-two",
+        stage_key="ip",
+        version_id=ip_version.id,
+        action="CONFIRM_VERSION",
+        confirmed=True,
+    )
+
+    assert event is not None
+    assert repeated_event is None
+    assert repeated_materials_run.id == materials_run.id
+    assert repeated_ip_decision.id == ip_decision.id
+    assert materials_run.stage == "MATERIALS"
+    assert materials_run.parent_stage_run_id == completed_ip.id
+    assert ip_decision.stage == "IP"
+    assert ip_decision.action == "CONFIRM_VERSION"
+    assert ip_decision.source_version_id == ip_version.id
+    assert project.current_stage == "MATERIALS"
+
+    materials_recorder = SqlAlchemyInvocationRecorder(
+        session,
+        stage_run_id=materials_run.id,
+    )
+    materials_workflow = build_brand_workflow(
+        text_provider=FakeTextModelProvider(),
+        image_provider=FakeImageModelProvider(),
+        artifact_writer=artifacts,
+        invocation_recorder=materials_recorder,
+        checkpointer=checkpointer,
+    )
+    completed_materials = await execute_stage_run(
+        session,
+        stage_run_id=materials_run.id,
+        workflow=materials_workflow,
+        invocation_recorder=materials_recorder,
+    )
+    materials_version = await session.get(StageVersion, completed_materials.result_version_id)
+    materials_output = MaterialOutput.model_validate(materials_version.output_json)
+
+    assert completed_materials.status == "SUCCEEDED"
+    assert len(materials_output.scenes) == 2
+    assert materials_version.input_refs_json == {
+        "brand_spec_version": 1,
+        "ip_version_id": ip_version.id,
+        "decision_id": ip_decision.id,
+        "ip_skipped": False,
+    }
+    assert project.current_stage == "MATERIALS"
 
 
 @pytest.mark.asyncio

@@ -35,6 +35,41 @@ HTTP 状态码为 `422`。
 
 为兼容 M0 早期消费者，当前仍保留旧的 `task` 和 `result` 字段；新联调优先使用项目状态字段。
 
+### GET `/api/v1/dev/demo-completed-flow`
+
+完成态项目的共享假数据。返回体与项目恢复接口一致，其中 `project.status=COMPLETED`、`current_stage=PROPOSAL`，可用于不跑真实数据库流程时验证完成态 UI。
+
+### GET `/api/v1/dev/demo-proposal-manifest`
+
+完成态 Proposal export manifest 的共享假数据。响应结构与正式接口：
+
+```text
+GET /api/v1/projects/{project_id}/exports/proposal-manifest
+```
+
+一致。
+
+### GET `/api/v1/dev/demo-proposal.md`
+
+完成态 Markdown 提案下载的共享假数据。响应为 `text/markdown; charset=utf-8`，带：
+
+```text
+Content-Disposition: attachment; filename="demo-proposal.md"
+```
+
+### GET `/api/v1/dev/demo-proposal.zip`
+
+完成态 ZIP 交付包的共享假数据。响应为 `application/zip`，包内固定包含：
+
+- `proposal.md`
+- `proposal-manifest.json`
+
+响应带：
+
+```text
+Content-Disposition: attachment; filename="demo-proposal.zip"
+```
+
 ### POST `/api/v1/projects`
 
 创建项目并排队首个 `INTAKE` StageRun。
@@ -159,7 +194,15 @@ HTTP 状态码为 `422`。
 
 ### POST `/api/v1/projects/{project_id}/stages/{stage_key}/decisions`
 
-项目级阶段决策入口。当前 worker milestone 只执行 `stage_key=directions` 的 `SELECT_VERSION`，用于选择一个 Directions 版本中的方向并排队下一阶段 `LOGO` StageRun。
+项目级阶段决策入口。当前 worker milestone 执行：
+
+- `stage_key=directions` 的 `SELECT_VERSION`：选择一个 Directions 版本中的方向，并排队下一阶段 `LOGO` StageRun。
+- `stage_key=logo` 的 `SELECT_VERSION`：选择一个 Logo 版本中的方案，并排队下一阶段 `VI` StageRun。
+- `stage_key=vi` 的 `CONFIRM_VERSION`：确认一个 VI 版本，并排队下一阶段 `IP` StageRun；worker 执行后会停在 `ip_choice`，此时 `IP` StageRun 状态为 `WAITING_USER`，不会生成 IP StageVersion。
+- `stage_key=ip` 的 `CONFIRM_VERSION`：确认一个已生成的 IP 版本，并排队下一阶段 `MATERIALS` StageRun。
+- `stage_key=materials` 的 `CONFIRM_VERSION`：确认一个 Materials 版本，并排队下一阶段 `REVIEW` StageRun。
+- `stage_key=review` 的 `CONFIRM_VERSION`：确认一个 Review 版本，并排队下一阶段 `PROPOSAL` StageRun。
+- `stage_key=proposal` 的 `CONFIRM_VERSION`：确认最终 Proposal 版本，记录终态确认 StageRun，并将项目状态置为 `COMPLETED`；该动作不会派发 worker，也不会生成新的 StageVersion。
 
 请求体：
 
@@ -171,7 +214,7 @@ HTTP 状态码为 `422`。
 }
 ```
 
-确认类决策的契约骨架已经固定，但当前 milestone 暂不执行后续阶段：
+确认类决策的请求体：
 
 ```json
 {
@@ -200,10 +243,17 @@ HTTP 状态码为 `422`。
 }
 ```
 
+Logo 选择成功时响应结构相同，其中 `decision.stage` 为 `LOGO`，`stage_run.stage` 为 `VI`。
+VI 确认成功时响应结构相同，其中 `decision.stage` 为 `VI`，`stage_run.stage` 为 `IP`。
+IP 确认成功时响应结构相同，其中 `decision.stage` 为 `IP`，`stage_run.stage` 为 `MATERIALS`。
+Materials 确认成功时响应结构相同，其中 `decision.stage` 为 `MATERIALS`，`stage_run.stage` 为 `REVIEW`。
+Review 确认成功时响应结构相同，其中 `decision.stage` 为 `REVIEW`，`stage_run.stage` 为 `PROPOSAL`。
+Proposal 确认成功时响应结构相同，其中 `decision.stage` 为 `PROPOSAL`，`stage_run.stage` 为 `PROPOSAL`，`stage_run.status` 为 `SUCCEEDED`。
+
 当前支持的 `action`：
 
-- `SELECT_VERSION`：必须传 `selected_item_id`。当前仅 `directions` 会真实排队下一阶段。
-- `CONFIRM_VERSION`：必须传 `confirmed=true`。当前只做请求/归属校验，然后返回 milestone 未支持的 `409`。
+- `SELECT_VERSION`：必须传 `selected_item_id`。当前 `directions` 和 `logo` 会真实排队下一阶段。
+- `CONFIRM_VERSION`：必须传 `confirmed=true`。当前 `vi` 会真实排队到 `IP` 选择等待点，`ip` 会真实排队到 `MATERIALS`，`materials` 会真实排队到 `REVIEW`，`review` 会真实排队到 `PROPOSAL`，`proposal` 会真实完成项目。
 
 幂等规则：
 
@@ -214,10 +264,22 @@ HTTP 状态码为 `422`。
 
 - 创建新决策时，会将该阶段之后的已有 StageVersion 标记为 `STALE`。
 - 例如重新选择 Directions 后，旧 Logo / VI / IP / Materials / Review / Proposal 版本会变为 `STALE`。
+- 重新选择 Logo 后，旧 VI / IP / Materials / Review / Proposal 版本会变为 `STALE`。
+- 重新确认 VI 后，旧 IP / Materials / Review / Proposal 版本会变为 `STALE`。
+- 重新确认 IP 后，旧 Materials / Review / Proposal 版本会变为 `STALE`。
+- 重新确认 Materials 后，旧 Review / Proposal 版本会变为 `STALE`。
+- 重新确认 Review 后，旧 Proposal 版本会变为 `STALE`。
+- 确认 Proposal 是终态动作，不会产生新的下游过期版本。
 
 状态转换：
 
 - 首次创建新的 `LOGO` StageRun 时，`project.current_stage` 会立即推进为 `LOGO`，即使 worker 仍处于 `QUEUED`。
+- 首次创建新的 `VI` StageRun 时，`project.current_stage` 会立即推进为 `VI`，即使 worker 仍处于 `QUEUED`。
+- 首次创建新的 `IP` StageRun 时，`project.current_stage` 会立即推进为 `IP`；worker 恢复到 IP 选择点后，该 StageRun 状态变为 `WAITING_USER`。
+- 首次创建新的 `MATERIALS` StageRun 时，`project.current_stage` 会立即推进为 `MATERIALS`，即使 worker 仍处于 `QUEUED`。
+- 首次创建新的 `REVIEW` StageRun 时，`project.current_stage` 会立即推进为 `REVIEW`，即使 worker 仍处于 `QUEUED`。
+- 首次创建新的 `PROPOSAL` StageRun 时，`project.current_stage` 会立即推进为 `PROPOSAL`，即使 worker 仍处于 `QUEUED`。
+- 确认 Proposal 后，`project.current_stage` 保持 `PROPOSAL`，`project.status` 变为 `COMPLETED`，最新 `PROPOSAL` StageRun 状态为 `SUCCEEDED` 且 `result_version_id` 指向被确认的 Proposal StageVersion。
 
 失败：
 
@@ -227,16 +289,124 @@ HTTP 状态码为 `422`。
 
 当前限制：
 
-- `logo` 的 `SELECT_VERSION` 会校验 `selected_item_id` 是否存在于该 Logo 版本；校验通过后仍暂返回 `409`，因为 Logo 选择进入 VI 的落库执行仍需后端 2 的 workflow milestone 对齐。
-- `vi` / `ip` / `materials` / `review` / `proposal` 的 `CONFIRM_VERSION` 暂返回 `409`，等待对应 worker milestone 对齐后再补执行。
+- 项目已可完成到 `COMPLETED`，并支持 Markdown 提案下载；PDF / PPT 等二进制交付物尚未在本后端 1 milestone 内实现。
 
-## Stage Control Skeletons
+## Exports
+
+### GET `/api/v1/projects/{project_id}/exports/proposal-manifest`
+
+完成态项目的提案导出清单。该接口不生成文件、不拼 MinIO URL，只返回最终 Proposal 版本中的结构化提案内容和 asset ID，供后续文件导出/下载服务使用。
+
+成功：`200`
+
+```json
+{
+  "project_id": "project-uuid",
+  "project_name": "云山咖啡",
+  "proposal_version_id": "proposal-version-uuid",
+  "proposal_stage_run_id": "proposal-run-uuid",
+  "decision_id": "proposal-confirm-decision-uuid",
+  "title": "云山咖啡 品牌概念提案",
+  "narrative": "从品牌需求出发，形成方向、标识、规范与应用的一致叙事。",
+  "sections": [
+    {
+      "type": "BRIEF",
+      "title": "品牌简报",
+      "summary": "用东方茶香提供轻盈的城市片刻。",
+      "version_id": "directions-version-uuid",
+      "asset_ids": []
+    }
+  ],
+  "asset_refs": ["asset-uuid"],
+  "generated_at": "2026-07-04T00:00:00Z"
+}
+```
+
+失败：
+
+- `404`：项目不存在或不属于当前 workspace。
+- `409`：项目尚未 `COMPLETED`，或完成态项目缺少 Proposal 版本/最终确认决策。
+
+### GET `/api/v1/projects/{project_id}/exports/proposal.md`
+
+完成态项目的 Markdown 提案下载。内容由 Proposal export manifest 渲染得到，包含导出元数据、章节摘要、章节版本 ID、章节 asset ID 和全局 asset_refs。
+
+成功：`200`
+
+响应头：
+
+```text
+Content-Type: text/markdown; charset=utf-8
+Content-Disposition: attachment; filename="proposal-{project_id}.md"
+```
+
+响应体示例：
+
+```markdown
+# 云山咖啡 品牌概念提案
+
+从品牌需求出发，形成方向、标识、规范与应用的一致叙事。
+
+## Export Metadata
+
+- Project: 云山咖啡 (`project-uuid`)
+- Proposal version: `proposal-version-uuid`
+- Proposal stage run: `proposal-run-uuid`
+- Final decision: `proposal-confirm-decision-uuid`
+- Generated at: 2026-07-04T00:00:00+00:00
+
+## Sections
+
+### 品牌简报
+
+- Type: `BRIEF`
+- Version: `directions-version-uuid`
+- Summary: 用东方茶香提供轻盈的城市片刻。
+- Assets: none
+```
+
+失败：
+
+- `404`：项目不存在或不属于当前 workspace。
+- `409`：项目尚未 `COMPLETED`，或完成态项目缺少 Proposal 版本/最终确认决策。
+
+### GET `/api/v1/projects/{project_id}/exports/proposal.zip`
+
+完成态项目的 ZIP 交付包下载。当前包内固定包含：
+
+- `proposal.md`：由最终 Proposal manifest 渲染的 Markdown 提案。
+- `proposal-manifest.json`：与 `proposal-manifest` 接口一致的结构化导出清单。
+
+成功：`200`
+
+响应头：
+
+```text
+Content-Type: application/zip
+Content-Disposition: attachment; filename="proposal-{project_id}.zip"
+```
+
+失败：
+
+- `404`：项目不存在或不属于当前 workspace。
+- `409`：项目尚未 `COMPLETED`，或完成态项目缺少 Proposal 版本/最终确认决策。
+
+## Stage Controls
 
 ### POST `/api/v1/projects/{project_id}/stages/{stage_key}/redo`
 
 ### POST `/api/v1/projects/{project_id}/stages/{stage_key}/skip`
 
-这两个接口当前只固化契约和错误语义，尚不执行真实状态转换。
+### POST `/api/v1/projects/{project_id}/stages/{stage_key}/generate`
+
+当前 `intake/redo`、`directions/redo`、`ip/skip` 和 `ip/generate` 已执行真实状态转换：
+
+- `intake/redo`：基于传入的 `INTAKE` StageVersion 创建新的 `INTAKE` StageRun，并派发 worker 重新执行 Intake。
+- `directions/redo`：基于传入的 `DIRECTIONS` StageVersion 创建新的 `DIRECTIONS` StageRun，并派发 worker 重新生成方向。
+- `ip/skip`：在 `IP` StageRun 处于 `WAITING_USER` 的 `ip_choice` 时，跳过 IP 并排队下一阶段 `MATERIALS` StageRun。
+- `ip/generate`：在 `IP` StageRun 处于 `WAITING_USER` 的 `ip_choice` 时，生成 IP 并落库新的 `IP` StageVersion，随后等待 IP 确认。
+
+其他 stage/action 当前仍只固化契约和错误语义，尚不执行真实状态转换。
 
 请求体可省略，也可以传：
 
@@ -251,7 +421,15 @@ HTTP 状态码为 `422`。
 
 - 校验 project / workspace / stage。
 - 如果传入 `source_version_id`，会校验该版本存在、属于当前项目、且阶段与路径 `stage_key` 一致。
-- 校验通过后仍返回当前 milestone 未支持的 `409`，不创建 StageRun，不派发 worker。
+- `POST /api/v1/projects/{project_id}/stages/intake/redo` 必须传 `source_version_id`；成功后创建新的 `INTAKE` StageRun，记录 `Decision(stage=INTAKE, action=REDO)`，将旧 Intake 及下游版本标记为 `STALE`，并派发 worker。
+- `POST /api/v1/projects/{project_id}/stages/directions/redo` 必须传 `source_version_id`；成功后创建新的 `DIRECTIONS` StageRun，记录 `Decision(stage=DIRECTIONS, action=REDO)`，将旧 Directions 及下游版本标记为 `STALE`，并派发 worker。
+- `POST /api/v1/projects/{project_id}/stages/ip/skip` 不接受 `source_version_id`；它会查找当前项目最新的 `IP / WAITING_USER` StageRun。
+- `ip/skip` 成功后创建 `MATERIALS` StageRun，记录 `Decision(stage=IP, action=SKIP)`，`source_version_id` 指向触发 IP 选择点的 VI 版本，并派发 worker。
+- `POST /api/v1/projects/{project_id}/stages/ip/generate` 不接受 `source_version_id`；它会查找当前项目最新的 `IP / WAITING_USER` StageRun。
+- `ip/generate` 成功后创建 `IP` StageRun，记录 `Decision(stage=IP, action=GENERATE)`，`source_version_id` 指向触发 IP 选择点的 VI 版本，并派发 worker。
+- `ip/skip` 会将旧 IP / Materials / Review / Proposal 版本标记为 `STALE`。
+- `ip/generate` 会将旧 IP / Materials / Review / Proposal 版本标记为 `STALE`；新生成的 IP 版本状态为 `GENERATED`。
+- 其他 stage/action 校验通过后仍返回当前 milestone 未支持的 `409`，不创建 StageRun，不派发 worker。
 
 失败：
 
@@ -259,6 +437,9 @@ HTTP 状态码为 `422`。
 - `404`：传入的 `source_version_id` 不存在或不属于当前项目。
 - `422`：stage key 非法。
 - `409`：传入的 `source_version_id` 阶段与路径阶段不一致。
+- `409`：`redo` 未传 `source_version_id`，或当前 stage 尚不支持真实 redo。
+- `409`：`ip/skip` 没有找到等待中的 IP 选择点，或传入了 `source_version_id`。
+- `409`：`ip/generate` 没有找到等待中的 IP 选择点，或传入了 `source_version_id`。
 - `409`：当前 worker milestone 暂不支持该 stage/action。
 
 ## Legacy StageRun Entrypoints
@@ -323,4 +504,4 @@ POST /api/v1/projects/{project_id}/stages/directions/decisions
 
 - 后端 1 只返回 artifact ID 和版本输出，不拼 MinIO URL。
 - 安全资产 URL / 短链由后端 3 storage adapter 提供。
-- `redo` / `skip` 的真实执行和后续 VI/IP/Materials/Review/Proposal 落库，需要等待对应 Agent workflow milestone 对齐后再补。
+- Logo 及之后阶段的真实 `redo`、PDF / PPT 等二进制导出仍待后续 milestone 对齐。
