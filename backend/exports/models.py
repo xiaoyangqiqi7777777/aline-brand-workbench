@@ -44,3 +44,25 @@ class ExportResult:
     filename: str
     content_type: str
     body: bytes
+
+
+@dataclass(frozen=True, slots=True)
+class ExportArtifactTarget:
+    artifact_id: str
+    bucket: str
+    object_key_prefix: str = "exports"
+    cache_control: str | None = "private, max-age=0, no-store"
+
+
+@dataclass(frozen=True, slots=True)
+class StoredExportArtifact:
+    export_id: str
+    artifact_id: str
+    format: ExportFormat
+    filename: str
+    content_type: str
+    byte_size: int
+    bucket: str
+    object_key: str
+    etag: str | None
+    version_id: str | None
