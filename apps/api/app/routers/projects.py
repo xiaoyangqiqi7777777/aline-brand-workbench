@@ -11,11 +11,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.api.app.config import get_settings
 from backend.application.projects import (
     CreateProjectCommand,
+    InvalidStageKeyError,
+    ProjectNotFoundError,
+    UnsupportedStageControlError,
     create_project,
     get_project,
     get_project_state,
     list_projects,
     list_stage_versions,
+    request_stage_control,
 )
 from backend.application.stage_runs import create_stage_decision, mark_outbox_published
 from backend.infrastructure.database.session import get_db_session
@@ -90,6 +94,13 @@ class StageDecisionRequest(BaseModel):
 class StageDecisionResponse(BaseModel):
     decision: DecisionStateResponse
     stage_run: StageRunStateResponse
+
+
+class StageControlResponse(BaseModel):
+    project_id: str
+    stage: str
+    action: Literal["REDO", "SKIP"]
+    status: str
 
 
 class ProjectResponse(BaseModel):
@@ -300,6 +311,72 @@ async def create_stage_decision_route(
             created_at=decision.created_at,
         ),
         stage_run=StageRunStateResponse.model_validate(stage_run, from_attributes=True),
+    )
+
+
+@router.post(
+    "/{project_id}/stages/{stage_key}/redo",
+    response_model=StageControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def redo_stage_route(
+    project_id: str,
+    stage_key: str,
+    session: SessionDependency,
+) -> StageControlResponse:
+    return await _request_stage_control_route(
+        project_id=project_id,
+        stage_key=stage_key,
+        action="REDO",
+        session=session,
+    )
+
+
+@router.post(
+    "/{project_id}/stages/{stage_key}/skip",
+    response_model=StageControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def skip_stage_route(
+    project_id: str,
+    stage_key: str,
+    session: SessionDependency,
+) -> StageControlResponse:
+    return await _request_stage_control_route(
+        project_id=project_id,
+        stage_key=stage_key,
+        action="SKIP",
+        session=session,
+    )
+
+
+async def _request_stage_control_route(
+    *,
+    project_id: str,
+    stage_key: str,
+    action: Literal["REDO", "SKIP"],
+    session: AsyncSession,
+) -> StageControlResponse:
+    try:
+        result = await request_stage_control(
+            session,
+            project_id=project_id,
+            workspace_id=get_settings().default_workspace_id,
+            stage_key=stage_key,
+            action=action,
+        )
+    except ProjectNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except InvalidStageKeyError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except UnsupportedStageControlError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    return StageControlResponse(
+        project_id=result.project_id,
+        stage=result.stage,
+        action=action,
+        status="QUEUED",
     )
 
 

@@ -271,3 +271,47 @@ def test_create_stage_decision_conflicting_selection_returns_409(
     assert response.json() == {
         "detail": "This Directions version already has another selection",
     }
+
+
+@pytest.mark.parametrize("action", ["redo", "skip"])
+def test_stage_control_missing_project_returns_404(api_client, action: str) -> None:
+    client, _ = api_client
+
+    response = client.post(f"/api/v1/projects/{uuid4()}/stages/directions/{action}")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Project not found"}
+
+
+@pytest.mark.parametrize("action", ["redo", "skip"])
+def test_stage_control_invalid_stage_returns_422(api_client, action: str) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(f"/api/v1/projects/{seeded.project_id}/stages/nope/{action}")
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid stage key: nope"}
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_detail"),
+    [
+        ("redo", "REDO is not supported by this worker milestone for DIRECTIONS"),
+        ("skip", "SKIP is not supported by this worker milestone for DIRECTIONS"),
+    ],
+)
+def test_stage_control_supported_stage_returns_current_milestone_error(
+    api_client,
+    action: str,
+    expected_detail: str,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/{action}",
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": expected_detail}

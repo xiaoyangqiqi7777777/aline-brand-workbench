@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -35,6 +35,43 @@ class ProjectState:
     stage_runs: list[StageRun]
     stage_versions: list[StageVersion]
     decisions: list[Decision]
+
+
+@dataclass(frozen=True)
+class StageControlResult:
+    project_id: str
+    stage: str
+    action: str
+
+
+class ProjectStageControlError(ValueError):
+    pass
+
+
+class ProjectNotFoundError(ProjectStageControlError):
+    pass
+
+
+class InvalidStageKeyError(ProjectStageControlError):
+    pass
+
+
+class UnsupportedStageControlError(ProjectStageControlError):
+    pass
+
+
+KNOWN_PROJECT_STAGES = frozenset(
+    {
+        "INTAKE",
+        "DIRECTIONS",
+        "LOGO",
+        "VI",
+        "IP",
+        "MATERIALS",
+        "REVIEW",
+        "PROPOSAL",
+    }
+)
 
 
 async def create_project(
@@ -219,6 +256,29 @@ async def list_stage_versions(
         .order_by(StageVersion.version_no.desc())
     )
     return list(versions)
+
+
+async def request_stage_control(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    workspace_id: str,
+    stage_key: str,
+    action: Literal["REDO", "SKIP"],
+) -> StageControlResult:
+    stage = normalize_stage_key(stage_key)
+    if stage not in KNOWN_PROJECT_STAGES:
+        raise InvalidStageKeyError(f"Invalid stage key: {stage_key}")
+
+    found_project_id = await session.scalar(
+        select(Project.id).where(Project.id == project_id, Project.workspace_id == workspace_id)
+    )
+    if found_project_id is None:
+        raise ProjectNotFoundError("Project not found")
+
+    raise UnsupportedStageControlError(
+        f"{action} is not supported by this worker milestone for {stage}"
+    )
 
 
 def normalize_stage_key(stage_key: str) -> str:
