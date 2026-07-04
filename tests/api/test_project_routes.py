@@ -118,38 +118,47 @@ async def seed_directions_project(
         )
 
 
-async def seed_logo_version(
+async def seed_stage_version(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     project_id: str,
+    stage: str,
 ) -> str:
     async with session_factory() as session:
-        logo_run = StageRun(
+        run = StageRun(
             workflow_thread_id=str(uuid4()),
             project_id=project_id,
-            stage="LOGO",
+            stage=stage,
             status="SUCCEEDED",
-            idempotency_key=f"api-test-logo:{project_id}",
+            idempotency_key=f"api-test-{stage.lower()}:{project_id}",
             input_json={},
         )
-        session.add(logo_run)
+        session.add(run)
         await session.flush()
 
-        logo_version = StageVersion(
+        version = StageVersion(
             project_id=project_id,
-            stage_run_id=logo_run.id,
-            stage="LOGO",
+            stage_run_id=run.id,
+            stage=stage,
             version_no=1,
             schema_version=1,
             input_refs_json={},
             output_json={},
             status="GENERATED",
         )
-        session.add(logo_version)
+        session.add(version)
         await session.flush()
-        logo_run.result_version_id = logo_version.id
+        run.result_version_id = version.id
         await session.commit()
-        return logo_version.id
+        return version.id
+
+
+async def seed_logo_version(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    project_id: str,
+) -> str:
+    return await seed_stage_version(session_factory, project_id=project_id, stage="LOGO")
 
 
 async def seed_succeeded_intake_project(
@@ -445,7 +454,76 @@ def test_create_stage_decision_unsupported_stage_returns_409(api_client) -> None
 
     assert response.status_code == 409
     assert response.json() == {
-        "detail": "LOGO decisions are not supported by this worker milestone",
+        "detail": "LOGO SELECT_VERSION decisions are not supported by this worker milestone",
+    }
+
+
+def test_create_stage_decision_confirm_version_skeleton_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    vi_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="VI",
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/vi/decisions",
+        json={
+            "version_id": vi_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "VI CONFIRM_VERSION decisions are not supported by this worker milestone",
+    }
+
+
+def test_create_stage_decision_select_version_requires_selected_item(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/decisions",
+        json={
+            "version_id": seeded.directions_version_id,
+            "action": "SELECT_VERSION",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "selected_item_id is required for SELECT_VERSION decisions",
+    }
+
+
+def test_create_stage_decision_confirm_version_requires_confirmation(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    vi_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="VI",
+        ),
+    )
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/vi/decisions",
+        json={
+            "version_id": vi_version_id,
+            "action": "CONFIRM_VERSION",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {
+        "detail": "confirmed=true is required for CONFIRM_VERSION decisions",
     }
 
 

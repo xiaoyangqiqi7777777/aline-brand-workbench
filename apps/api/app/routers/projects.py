@@ -94,8 +94,9 @@ class StageDecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     version_id: UUID
-    selected_item_id: str = Field(min_length=1, max_length=120)
-    action: Literal["SELECT_VERSION"] = "SELECT_VERSION"
+    selected_item_id: str | None = Field(default=None, min_length=1, max_length=120)
+    confirmed: Literal[True] | None = None
+    action: Literal["SELECT_VERSION", "CONFIRM_VERSION"] = "SELECT_VERSION"
 
 
 class StageDecisionResponse(BaseModel):
@@ -296,6 +297,7 @@ async def create_stage_decision_route(
             stage_key=stage_key,
             version_id=str(payload.version_id),
             selected_item_id=payload.selected_item_id,
+            confirmed=payload.confirmed,
             action=payload.action,
         )
     except StageDecisionNotFoundError as error:

@@ -27,6 +27,8 @@ from backend.infrastructure.database.models import (
     StageVersion,
 )
 
+SUPPORTED_STAGE_DECISION_ACTIONS = frozenset({"SELECT_VERSION", "CONFIRM_VERSION"})
+
 
 class StageDecisionError(ValueError):
     pass
@@ -68,12 +70,17 @@ async def create_stage_decision(
     actor_id: str,
     stage_key: str,
     version_id: str,
-    selected_item_id: str,
+    selected_item_id: str | None = None,
+    confirmed: bool | None = None,
     action: str = "SELECT_VERSION",
 ) -> tuple[StageRun, Decision, OutboxEvent | None]:
     stage = normalize_stage_key(stage_key)
-    if action != "SELECT_VERSION":
-        raise InvalidStageDecisionError("Only SELECT_VERSION decisions are supported")
+    if action not in SUPPORTED_STAGE_DECISION_ACTIONS:
+        raise InvalidStageDecisionError(f"Unsupported decision action: {action}")
+    if action == "SELECT_VERSION" and selected_item_id is None:
+        raise InvalidStageDecisionError("selected_item_id is required for SELECT_VERSION decisions")
+    if action == "CONFIRM_VERSION" and confirmed is not True:
+        raise InvalidStageDecisionError("confirmed=true is required for CONFIRM_VERSION decisions")
     if stage not in KNOWN_PROJECT_STAGES:
         raise InvalidStageDecisionError(f"Invalid stage key: {stage_key}")
 
@@ -92,6 +99,11 @@ async def create_stage_decision(
         raise StageDecisionConflictError("Stage version does not belong to requested stage")
 
     if stage == "DIRECTIONS":
+        if action != "SELECT_VERSION":
+            raise UnsupportedStageDecisionError(
+                f"{stage} {action} decisions are not supported by this worker milestone"
+            )
+        assert selected_item_id is not None
         return await create_direction_selection_run(
             session,
             source_stage_run_id=source_version.stage_run_id,
@@ -102,7 +114,7 @@ async def create_stage_decision(
         )
 
     raise UnsupportedStageDecisionError(
-        f"{stage} decisions are not supported by this worker milestone"
+        f"{stage} {action} decisions are not supported by this worker milestone"
     )
 
 

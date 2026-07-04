@@ -153,7 +153,7 @@ HTTP 状态码为 `422`。
 
 ### POST `/api/v1/projects/{project_id}/stages/{stage_key}/decisions`
 
-项目级阶段决策入口。当前 worker milestone 只支持 `stage_key=directions` 的 `SELECT_VERSION`，用于选择一个 Directions 版本中的方向并排队下一阶段 `LOGO` StageRun。
+项目级阶段决策入口。当前 worker milestone 只执行 `stage_key=directions` 的 `SELECT_VERSION`，用于选择一个 Directions 版本中的方向并排队下一阶段 `LOGO` StageRun。
 
 请求体：
 
@@ -162,6 +162,16 @@ HTTP 状态码为 `422`。
   "version_id": "directions-version-uuid",
   "selected_item_id": "direction-a",
   "action": "SELECT_VERSION"
+}
+```
+
+确认类决策的契约骨架已经固定，但当前 milestone 暂不执行后续阶段：
+
+```json
+{
+  "version_id": "vi-version-uuid",
+  "action": "CONFIRM_VERSION",
+  "confirmed": true
 }
 ```
 
@@ -184,6 +194,11 @@ HTTP 状态码为 `422`。
 }
 ```
 
+当前支持的 `action`：
+
+- `SELECT_VERSION`：必须传 `selected_item_id`。当前仅 `directions` 会真实排队下一阶段。
+- `CONFIRM_VERSION`：必须传 `confirmed=true`。当前只做请求/归属校验，然后返回 milestone 未支持的 `409`。
+
 幂等规则：
 
 - 对同一个 `version_id` 和同一个 `selected_item_id` 重复提交，返回原 Decision 和原 StageRun，不重复派发 worker。
@@ -201,12 +216,13 @@ HTTP 状态码为 `422`。
 失败：
 
 - `404`：项目不存在，或版本不存在/不属于该项目。
-- `422`：stage key 非法，或 action 不是 `SELECT_VERSION`。
+- `422`：stage key 非法、action 非法，或 action 所需字段缺失。
 - `409`：版本阶段与路径阶段不一致、选择项不存在、重复选择冲突，或当前 milestone 暂不支持该 stage。
 
 当前限制：
 
-- `logo` 决策暂返回 `409`，因为 Logo 选择进入 VI 的落库执行仍需后端 2 的 workflow milestone 对齐。
+- `logo` 的 `SELECT_VERSION` 暂返回 `409`，因为 Logo 选择进入 VI 的落库执行仍需后端 2 的 workflow milestone 对齐。
+- `vi` / `ip` / `materials` / `review` / `proposal` 的 `CONFIRM_VERSION` 暂返回 `409`，等待对应 worker milestone 对齐后再补执行。
 
 ## Stage Control Skeletons
 
