@@ -10,6 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from apps.api.app.config import get_settings
 from backend.agents.schemas.intake import IntakeResumePayload
 from backend.application.stage_runs import (
+    StageDecisionConflictError,
+    StageDecisionNotFoundError,
+    StageResumeConflictError,
+    StageResumeNotFoundError,
     create_direction_selection_run,
     create_intake_resume_run,
     get_stage_run,
@@ -69,7 +73,9 @@ async def submit_direction_selection(
             version_id=str(payload.version_id),
             direction_id=payload.direction_id,
         )
-    except ValueError as error:
+    except StageDecisionNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except StageDecisionConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     if outbox_event is not None:
         from apps.api.app.tasks import execute_agent_stage
@@ -96,7 +102,9 @@ async def submit_intake_answers(
             workspace_id=get_settings().default_workspace_id,
             resume_payload=payload,
         )
-    except ValueError as error:
+    except StageResumeNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except StageResumeConflictError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
     if outbox_event is not None:
         from apps.api.app.tasks import execute_agent_stage

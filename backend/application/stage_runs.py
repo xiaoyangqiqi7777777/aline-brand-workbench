@@ -5,7 +5,7 @@ import json
 from uuid import uuid4
 
 from langgraph.types import Command
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.agents.ports import RecoverableInvocationRecorder
@@ -13,6 +13,11 @@ from backend.agents.schemas.brand_spec import BrandSpec
 from backend.agents.schemas.directions import DirectionOutput
 from backend.agents.schemas.intake import IntakeOutput, IntakeResumePayload
 from backend.agents.schemas.logo import LogoOutput
+from backend.application.stages import (
+    KNOWN_PROJECT_STAGES,
+    downstream_project_stages,
+    normalize_stage_key,
+)
 from backend.infrastructure.database.models import (
     BrandSpecRecord,
     Decision,
@@ -21,6 +26,102 @@ from backend.infrastructure.database.models import (
     StageRun,
     StageVersion,
 )
+
+SUPPORTED_STAGE_DECISION_ACTIONS = frozenset({"SELECT_VERSION", "CONFIRM_VERSION"})
+
+
+class StageDecisionError(ValueError):
+    pass
+
+
+class StageDecisionNotFoundError(StageDecisionError):
+    pass
+
+
+class InvalidStageDecisionError(StageDecisionError):
+    pass
+
+
+class UnsupportedStageDecisionError(StageDecisionError):
+    pass
+
+
+class StageDecisionConflictError(StageDecisionError):
+    pass
+
+
+class StageResumeError(ValueError):
+    pass
+
+
+class StageResumeNotFoundError(StageResumeError):
+    pass
+
+
+class StageResumeConflictError(StageResumeError):
+    pass
+
+
+async def create_stage_decision(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    workspace_id: str,
+    actor_id: str,
+    stage_key: str,
+    version_id: str,
+    selected_item_id: str | None = None,
+    confirmed: bool | None = None,
+    action: str = "SELECT_VERSION",
+) -> tuple[StageRun, Decision, OutboxEvent | None]:
+    stage = normalize_stage_key(stage_key)
+    if action not in SUPPORTED_STAGE_DECISION_ACTIONS:
+        raise InvalidStageDecisionError(f"Unsupported decision action: {action}")
+    if action == "SELECT_VERSION" and selected_item_id is None:
+        raise InvalidStageDecisionError("selected_item_id is required for SELECT_VERSION decisions")
+    if action == "CONFIRM_VERSION" and confirmed is not True:
+        raise InvalidStageDecisionError("confirmed=true is required for CONFIRM_VERSION decisions")
+    if stage not in KNOWN_PROJECT_STAGES:
+        raise InvalidStageDecisionError(f"Invalid stage key: {stage_key}")
+
+    found_project_id = await session.scalar(
+        select(Project.id).where(Project.id == project_id, Project.workspace_id == workspace_id)
+    )
+    if found_project_id is None:
+        raise StageDecisionNotFoundError("Project not found")
+
+    source_version = await session.get(StageVersion, version_id)
+    if source_version is None:
+        raise StageDecisionNotFoundError("Stage version not found")
+    if source_version.project_id != project_id:
+        raise StageDecisionNotFoundError("Stage version not found")
+    if source_version.stage != stage:
+        raise StageDecisionConflictError("Stage version does not belong to requested stage")
+
+    if stage == "DIRECTIONS":
+        if action != "SELECT_VERSION":
+            raise UnsupportedStageDecisionError(
+                f"{stage} {action} decisions are not supported by this worker milestone"
+            )
+        assert selected_item_id is not None
+        return await create_direction_selection_run(
+            session,
+            source_stage_run_id=source_version.stage_run_id,
+            workspace_id=workspace_id,
+            actor_id=actor_id,
+            version_id=version_id,
+            direction_id=selected_item_id,
+        )
+
+    if stage == "LOGO" and action == "SELECT_VERSION":
+        assert selected_item_id is not None
+        logo_output = LogoOutput.model_validate(source_version.output_json)
+        if selected_item_id not in {item.id for item in logo_output.concepts}:
+            raise StageDecisionConflictError("Selected logo does not exist in current version")
+
+    raise UnsupportedStageDecisionError(
+        f"{stage} {action} decisions are not supported by this worker milestone"
+    )
 
 
 async def create_direction_selection_run(
@@ -42,11 +143,13 @@ async def create_direction_selection_run(
         .with_for_update()
     )
     if source_run is None:
-        raise ValueError("Stage run not found")
+        raise StageDecisionNotFoundError("Stage run not found")
     if source_run.stage != "DIRECTIONS" or source_run.status != "SUCCEEDED":
-        raise ValueError("Only a succeeded Directions run can accept a selection")
+        raise StageDecisionConflictError("Only a succeeded Directions run can accept a selection")
     if source_run.result_version_id != version_id:
-        raise ValueError("Selected version is not the result of this Directions run")
+        raise StageDecisionConflictError(
+            "Selected version is not the result of this Directions run"
+        )
 
     source_version = await session.get(StageVersion, version_id)
     if (
@@ -54,10 +157,10 @@ async def create_direction_selection_run(
         or source_version.project_id != source_run.project_id
         or source_version.stage != "DIRECTIONS"
     ):
-        raise ValueError("Directions version not found")
+        raise StageDecisionNotFoundError("Directions version not found")
     direction_output = DirectionOutput.model_validate(source_version.output_json)
     if direction_id not in {item.id for item in direction_output.directions}:
-        raise ValueError("Selected direction does not exist in current version")
+        raise StageDecisionConflictError("Selected direction does not exist in current version")
 
     existing_decision = await session.scalar(
         select(Decision).where(
@@ -67,13 +170,15 @@ async def create_direction_selection_run(
     )
     if existing_decision is not None:
         if existing_decision.selected_item_id != direction_id:
-            raise ValueError("This Directions version already has another selection")
+            raise StageDecisionConflictError(
+                "This Directions version already has another selection"
+            )
         existing_run = await session.get(
             StageRun,
             existing_decision.resulting_stage_run_id,
         )
         if existing_run is None:
-            raise ValueError("Direction decision has no resulting Stage run")
+            raise StageDecisionConflictError("Direction decision has no resulting Stage run")
         return existing_run, existing_decision, None
 
     run_id = str(uuid4())
@@ -113,9 +218,40 @@ async def create_direction_selection_run(
         topic="agent.stage_run.requested",
         payload_json={"stage_run_id": run_id},
     )
+    await mark_downstream_versions_stale(
+        session,
+        project_id=source_run.project_id,
+        stage=source_run.stage,
+    )
+    project = await session.get(Project, source_run.project_id)
+    if project is None:
+        raise StageDecisionNotFoundError("Project not found")
+    project.current_stage = resumed_run.stage
+    project.version += 1
     session.add_all([decision, event])
     await session.commit()
     return resumed_run, decision, event
+
+
+async def mark_downstream_versions_stale(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    stage: str,
+) -> None:
+    downstream_stages = downstream_project_stages(stage)
+    if not downstream_stages:
+        return
+
+    await session.execute(
+        update(StageVersion)
+        .where(
+            StageVersion.project_id == project_id,
+            StageVersion.stage.in_(downstream_stages),
+            StageVersion.status != "STALE",
+        )
+        .values(status="STALE")
+    )
 
 
 async def create_intake_resume_run(
@@ -135,11 +271,11 @@ async def create_intake_resume_run(
         .with_for_update()
     )
     if source_run is None:
-        raise ValueError("Stage run not found")
+        raise StageResumeNotFoundError("Stage run not found")
     if source_run.stage != "INTAKE" or source_run.status != "SUCCEEDED":
-        raise ValueError("Only a succeeded Intake run can accept answers")
+        raise StageResumeConflictError("Only a succeeded Intake run can accept answers")
     if source_run.result_version_id is None:
-        raise ValueError("Intake run has no result to resume")
+        raise StageResumeConflictError("Intake run has no result to resume")
 
     payload_json = resume_payload.model_dump(mode="json")
     digest = hashlib.sha256(
@@ -170,6 +306,16 @@ async def create_intake_resume_run(
         topic="agent.stage_run.requested",
         payload_json={"stage_run_id": run_id},
     )
+    await mark_downstream_versions_stale(
+        session,
+        project_id=source_run.project_id,
+        stage=source_run.stage,
+    )
+    project = await session.get(Project, source_run.project_id)
+    if project is None:
+        raise StageResumeNotFoundError("Project not found")
+    project.current_stage = resumed_run.stage
+    project.version += 1
     session.add_all([resumed_run, event])
     await session.commit()
     return resumed_run, event

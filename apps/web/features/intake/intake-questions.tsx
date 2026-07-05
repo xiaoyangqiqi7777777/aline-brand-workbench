@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useState } from "react";
 
 import { Button, Field, TextArea, TextInput } from "@/components/ui";
 import type { IntakeAnswer, IntakeQuestion, IntakeResult, JsonValue } from "@/lib/api/types";
@@ -60,15 +60,6 @@ export function IntakeQuestions({
   const [draft, setDraft] = useState<AnswerDraft>(() => initialDraft(result.questions));
   const [validationMessage, setValidationMessage] = useState<string | null>(null);
 
-  const questionIds = useMemo(
-    () => result.questions.map((question) => question.id).join("|"),
-    [result.questions],
-  );
-
-  useEffect(() => {
-    setDraft(initialDraft(result.questions));
-  }, [questionIds, result.questions]);
-
   function updateText(questionId: string, value: string) {
     setDraft((current) => ({ ...current, [questionId]: value }));
   }
@@ -105,7 +96,7 @@ export function IntakeQuestions({
   }
 
   return (
-    <section className="intake-panel" key={questionIds}>
+    <section className="intake-panel">
       <header className="section-header">
         <span className="step-pill">Intake 补问</span>
         <h2>补齐品牌信息</h2>

@@ -106,6 +106,9 @@ function ActiveRunPanel({
     if (!activeRun.result.ready) {
       return (
         <IntakeQuestions
+          key={`${activeRun.id}:${activeRun.result.questions
+            .map((question) => question.id)
+            .join("|")}`}
           intakeRunId={activeRun.id}
           isSubmitting={isSubmittingAnswers}
           onSubmit={onSubmitIntakeAnswers}

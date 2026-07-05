@@ -80,7 +80,6 @@ export function ProjectWorkspace({ initialProjectId }: ProjectWorkspaceProps) {
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [isLoadingProjects, setIsLoadingProjects] = useState(true);
-  const [isPolling, setIsPolling] = useState(false);
   const [isSubmittingAnswers, setIsSubmittingAnswers] = useState(false);
   const [isSubmittingProject, setIsSubmittingProject] = useState(false);
   const [pollingRunId, setPollingRunId] = useState<string | null>(null);
@@ -94,6 +93,7 @@ export function ProjectWorkspace({ initialProjectId }: ProjectWorkspaceProps) {
     () => projects.find((project) => project.id === selectedProjectId)?.name ?? "未选择项目",
     [projects, selectedProjectId],
   );
+  const isPolling = Boolean(pollingRunId);
 
   const loadProjectDetail = useCallback(async (projectId: string) => {
     setIsLoadingDetail(true);
@@ -153,24 +153,28 @@ export function ProjectWorkspace({ initialProjectId }: ProjectWorkspaceProps) {
   }, [initialProjectId]);
 
   useEffect(() => {
-    void loadProjects();
+    const timeout = window.setTimeout(() => {
+      void loadProjects();
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
   }, [loadProjects]);
 
   useEffect(() => {
-    if (initialProjectId) {
-      setSelectedProjectId(initialProjectId);
-    }
-  }, [initialProjectId]);
-
-  useEffect(() => {
     if (!selectedProjectId) {
-      setProjectDetail(null);
-      setActiveRun(null);
       return;
     }
 
     window.localStorage.setItem(LAST_PROJECT_KEY, selectedProjectId);
-    void loadProjectDetail(selectedProjectId);
+    const timeout = window.setTimeout(() => {
+      void loadProjectDetail(selectedProjectId);
+    }, 0);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
   }, [loadProjectDetail, selectedProjectId]);
 
   useEffect(() => {
@@ -179,7 +183,6 @@ export function ProjectWorkspace({ initialProjectId }: ProjectWorkspaceProps) {
     }
 
     const controller = new AbortController();
-    setIsPolling(true);
     pollStageRun(pollingRunId, {
       signal: controller.signal,
       onUpdate: setActiveRun,
@@ -195,16 +198,10 @@ export function ProjectWorkspace({ initialProjectId }: ProjectWorkspaceProps) {
           setErrorMessage(getErrorMessage(error));
           setPollingRunId(null);
         }
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) {
-          setIsPolling(false);
-        }
       });
 
     return () => {
       controller.abort();
-      setIsPolling(false);
     };
   }, [loadProjectDetail, loadProjects, pollingRunId]);
 
