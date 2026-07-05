@@ -1041,6 +1041,38 @@ def test_completed_project_rejects_non_final_stage_decisions(
     assert state_payload["current_stage"] == "PROPOSAL"
 
 
+def test_completed_project_rejects_stage_controls(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    asyncio.run(mark_project_completed(session_factory, project_id=seeded.project_id))
+    dispatched_stage_run_ids: list[str] = []
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", dispatched_stage_run_ids.append)
+
+    response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/directions/redo",
+        json={
+            "source_version_id": seeded.directions_version_id,
+            "reason": "completed projects are terminal",
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Completed project cannot accept stage controls",
+    }
+    assert dispatched_stage_run_ids == []
+    state_payload = state_response.json()
+    assert state_payload["project"]["status"] == "COMPLETED"
+    assert state_payload["current_stage"] == "PROPOSAL"
+
+
 def test_get_proposal_export_manifest_returns_completed_project_manifest(
     api_client,
     monkeypatch,
@@ -1765,6 +1797,39 @@ def test_intake_answers_stale_intake_version_returns_409(api_client) -> None:
     assert response.json() == {"detail": "Only a generated Intake version can accept answers"}
 
 
+def test_completed_project_rejects_intake_answers(api_client, monkeypatch) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_succeeded_intake_project(session_factory))
+    asyncio.run(mark_project_completed(session_factory, project_id=seeded.project_id))
+    dispatched_stage_run_ids: list[str] = []
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", dispatched_stage_run_ids.append)
+
+    response = client.post(
+        f"/api/v1/stage-runs/{seeded.intake_run_id}/intake-answers",
+        json={
+            "answers": [
+                {
+                    "field_path": "industry",
+                    "value": "茶饮",
+                }
+            ]
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Completed project cannot accept intake answers",
+    }
+    assert dispatched_stage_run_ids == []
+    state_payload = state_response.json()
+    assert state_payload["project"]["status"] == "COMPLETED"
+    assert state_payload["current_stage"] == "PROPOSAL"
+
+
 def test_legacy_direction_selection_dispatches_logo_run(api_client, monkeypatch) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
@@ -1822,6 +1887,38 @@ def test_legacy_direction_selection_stale_version_returns_409(api_client) -> Non
 
     assert response.status_code == 409
     assert response.json() == {"detail": "Only a generated Stage version can be decided"}
+
+
+def test_completed_project_rejects_legacy_direction_selection(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    asyncio.run(mark_project_completed(session_factory, project_id=seeded.project_id))
+    dispatched_stage_run_ids: list[str] = []
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", dispatched_stage_run_ids.append)
+
+    response = client.post(
+        f"/api/v1/stage-runs/{seeded.directions_run_id}/direction-selection",
+        json={
+            "version_id": seeded.directions_version_id,
+            "direction_id": seeded.direction_ids[0],
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Completed project cannot accept stage decisions",
+    }
+    assert dispatched_stage_run_ids == []
+    state_payload = state_response.json()
+    assert state_payload["project"]["status"] == "COMPLETED"
+    assert state_payload["current_stage"] == "PROPOSAL"
 
 
 def test_legacy_direction_selection_conflicting_selection_returns_409(

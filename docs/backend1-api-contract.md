@@ -430,6 +430,7 @@ Content-Disposition: attachment; filename="proposal-{project_id}.zip"
 - `ip/skip` 和 `ip/generate` 都要求触发 IP 选择点的 VI 版本仍为 `GENERATED`；如果上游已将该 VI 版本标记为 `STALE`，则不能继续推进旧 IP 选择。
 - `ip/skip` 会将旧 IP / Materials / Review / Proposal 版本标记为 `STALE`。
 - `ip/generate` 会将旧 IP / Materials / Review / Proposal 版本标记为 `STALE`；新生成的 IP 版本状态为 `GENERATED`。
+- 如果项目已是 `COMPLETED`，所有 stage control 写操作都会返回 `409`，不创建 StageRun，不派发 worker。
 - 其他 stage/action 校验通过后仍返回当前 milestone 未支持的 `409`，不创建 StageRun，不派发 worker。
 
 失败：
@@ -438,6 +439,7 @@ Content-Disposition: attachment; filename="proposal-{project_id}.zip"
 - `404`：传入的 `source_version_id` 不存在或不属于当前项目。
 - `422`：stage key 非法。
 - `409`：传入的 `source_version_id` 阶段与路径阶段不一致。
+- `409`：项目已是 `COMPLETED`，不再接受 stage control 写操作。
 - `409`：`redo` 未传 `source_version_id`，或当前 stage 尚不支持真实 redo。
 - `409`：`ip/skip` 没有找到等待中的 IP 选择点、传入了 `source_version_id`，或源 VI 版本已是 `STALE`。
 - `409`：`ip/generate` 没有找到等待中的 IP 选择点、传入了 `source_version_id`，或源 VI 版本已是 `STALE`。
@@ -478,6 +480,7 @@ Content-Disposition: attachment; filename="proposal-{project_id}.zip"
 错误语义：
 
 - `404`：StageRun 不存在或不属于当前 workspace。
+- `409`：项目已是 `COMPLETED`，不再接受 Intake answers。
 - `409`：StageRun 不是已成功的 `INTAKE`、Intake 没有可 resume 的结果，或 Intake 版本已是 `STALE`。
 
 ### POST `/api/v1/stage-runs/{stage_run_id}/direction-selection`
@@ -491,6 +494,7 @@ POST /api/v1/projects/{project_id}/stages/directions/decisions
 旧入口错误语义：
 
 - `404`：StageRun 不存在或不属于当前 workspace。
+- `409`：项目已是 `COMPLETED`，不再接受 Directions selection。
 - `409`：StageRun 状态不允许选择、版本不匹配、Directions version 已是 `STALE`、选择项不存在或重复选择冲突。
 
 ### GET `/api/v1/stage-runs/{stage_run_id}`

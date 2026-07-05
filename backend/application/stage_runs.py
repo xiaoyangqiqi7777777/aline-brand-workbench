@@ -257,6 +257,11 @@ async def create_direction_selection_run(
     )
     if source_run is None:
         raise StageDecisionNotFoundError("Stage run not found")
+    project = await session.get(Project, source_run.project_id)
+    if project is None:
+        raise StageDecisionNotFoundError("Project not found")
+    if project.status == "COMPLETED":
+        raise StageDecisionConflictError("Completed project cannot accept stage decisions")
     if source_run.stage != "DIRECTIONS" or source_run.status != "SUCCEEDED":
         raise StageDecisionConflictError("Only a succeeded Directions run can accept a selection")
     if source_run.result_version_id != version_id:
@@ -680,6 +685,11 @@ async def create_intake_resume_run(
     )
     if source_run is None:
         raise StageResumeNotFoundError("Stage run not found")
+    project = await session.get(Project, source_run.project_id)
+    if project is None:
+        raise StageResumeNotFoundError("Project not found")
+    if project.status == "COMPLETED":
+        raise StageResumeConflictError("Completed project cannot accept intake answers")
     if source_run.stage != "INTAKE" or source_run.status != "SUCCEEDED":
         raise StageResumeConflictError("Only a succeeded Intake run can accept answers")
     if source_run.result_version_id is None:
@@ -724,9 +734,6 @@ async def create_intake_resume_run(
         project_id=source_run.project_id,
         stage=source_run.stage,
     )
-    project = await session.get(Project, source_run.project_id)
-    if project is None:
-        raise StageResumeNotFoundError("Project not found")
     project.current_stage = resumed_run.stage
     project.version += 1
     session.add_all([resumed_run, event])

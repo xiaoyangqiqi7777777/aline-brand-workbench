@@ -281,11 +281,13 @@ async def request_stage_control(
     if stage not in KNOWN_PROJECT_STAGES:
         raise InvalidStageKeyError(f"Invalid stage key: {stage_key}")
 
-    found_project_id = await session.scalar(
-        select(Project.id).where(Project.id == project_id, Project.workspace_id == workspace_id)
+    project = await session.scalar(
+        select(Project).where(Project.id == project_id, Project.workspace_id == workspace_id)
     )
-    if found_project_id is None:
+    if project is None:
         raise ProjectNotFoundError("Project not found")
+    if project.status == "COMPLETED":
+        raise StageControlConflictError("Completed project cannot accept stage controls")
 
     if stage == "IP" and action == "SKIP" and source_version_id is not None:
         raise StageControlConflictError("IP skip does not accept source_version_id")
