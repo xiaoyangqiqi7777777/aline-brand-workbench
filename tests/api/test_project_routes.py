@@ -2105,6 +2105,30 @@ def test_ip_skip_without_waiting_choice_returns_409(api_client) -> None:
     assert response.json() == {"detail": "No waiting IP choice found"}
 
 
+@pytest.mark.parametrize("action", ["skip", "generate"])
+def test_ip_choice_control_rejects_stale_source_vi_version(
+    api_client,
+    monkeypatch,
+    action: str,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_ip_choice_project(session_factory))
+    asyncio.run(mark_stage_version_stale(session_factory, version_id=seeded.vi_version_id))
+    dispatched_stage_run_ids: list[str] = []
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", dispatched_stage_run_ids.append)
+
+    response = client.post(f"/api/v1/projects/{seeded.project_id}/stages/ip/{action}")
+
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Only a generated VI version can choose IP handling",
+    }
+    assert dispatched_stage_run_ids == []
+
+
 def test_ip_generate_dispatches_ip_run_and_is_idempotent(
     api_client,
     monkeypatch,

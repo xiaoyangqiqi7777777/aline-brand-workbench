@@ -465,6 +465,11 @@ async def _skip_ip_choice(
     vi_version_id = ip_choice_run.input_json.get("vi_version_id")
     if not isinstance(vi_version_id, str):
         raise StageControlConflictError("IP choice is missing source VI version")
+    await _validate_ip_choice_vi_version(
+        session,
+        project_id=project_id,
+        vi_version_id=vi_version_id,
+    )
 
     existing_choice = await session.scalar(
         select(Decision).where(
@@ -575,6 +580,11 @@ async def _generate_ip_choice(
     vi_version_id = ip_choice_run.input_json.get("vi_version_id")
     if not isinstance(vi_version_id, str):
         raise StageControlConflictError("IP choice is missing source VI version")
+    await _validate_ip_choice_vi_version(
+        session,
+        project_id=project_id,
+        vi_version_id=vi_version_id,
+    )
 
     existing_choice = await session.scalar(
         select(Decision).where(
@@ -659,3 +669,16 @@ async def _generate_ip_choice(
         status=ip_run.status,
         outbox_event=event,
     )
+
+
+async def _validate_ip_choice_vi_version(
+    session: AsyncSession,
+    *,
+    project_id: str,
+    vi_version_id: str,
+) -> None:
+    vi_version = await session.get(StageVersion, vi_version_id)
+    if vi_version is None or vi_version.project_id != project_id or vi_version.stage != "VI":
+        raise StageControlConflictError("IP choice source VI version not found")
+    if vi_version.status != "GENERATED":
+        raise StageControlConflictError("Only a generated VI version can choose IP handling")

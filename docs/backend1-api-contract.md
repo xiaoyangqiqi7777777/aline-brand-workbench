@@ -427,6 +427,7 @@ Content-Disposition: attachment; filename="proposal-{project_id}.zip"
 - `ip/skip` 成功后创建 `MATERIALS` StageRun，记录 `Decision(stage=IP, action=SKIP)`，`source_version_id` 指向触发 IP 选择点的 VI 版本，并派发 worker。
 - `POST /api/v1/projects/{project_id}/stages/ip/generate` 不接受 `source_version_id`；它会查找当前项目最新的 `IP / WAITING_USER` StageRun。
 - `ip/generate` 成功后创建 `IP` StageRun，记录 `Decision(stage=IP, action=GENERATE)`，`source_version_id` 指向触发 IP 选择点的 VI 版本，并派发 worker。
+- `ip/skip` 和 `ip/generate` 都要求触发 IP 选择点的 VI 版本仍为 `GENERATED`；如果上游已将该 VI 版本标记为 `STALE`，则不能继续推进旧 IP 选择。
 - `ip/skip` 会将旧 IP / Materials / Review / Proposal 版本标记为 `STALE`。
 - `ip/generate` 会将旧 IP / Materials / Review / Proposal 版本标记为 `STALE`；新生成的 IP 版本状态为 `GENERATED`。
 - 其他 stage/action 校验通过后仍返回当前 milestone 未支持的 `409`，不创建 StageRun，不派发 worker。
@@ -438,8 +439,8 @@ Content-Disposition: attachment; filename="proposal-{project_id}.zip"
 - `422`：stage key 非法。
 - `409`：传入的 `source_version_id` 阶段与路径阶段不一致。
 - `409`：`redo` 未传 `source_version_id`，或当前 stage 尚不支持真实 redo。
-- `409`：`ip/skip` 没有找到等待中的 IP 选择点，或传入了 `source_version_id`。
-- `409`：`ip/generate` 没有找到等待中的 IP 选择点，或传入了 `source_version_id`。
+- `409`：`ip/skip` 没有找到等待中的 IP 选择点、传入了 `source_version_id`，或源 VI 版本已是 `STALE`。
+- `409`：`ip/generate` 没有找到等待中的 IP 选择点、传入了 `source_version_id`，或源 VI 版本已是 `STALE`。
 - `409`：当前 worker milestone 暂不支持该 stage/action。
 
 ## Legacy StageRun Entrypoints
