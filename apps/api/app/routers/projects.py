@@ -4,11 +4,18 @@ from datetime import datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from apps.api.app.config import get_settings
+from backend.application.exports import (
+    ProjectExportConflictError,
+    ProjectExportNotFoundError,
+    get_proposal_export_manifest,
+    render_proposal_markdown,
+    render_proposal_zip,
+)
 from backend.application.projects import (
     CreateProjectCommand,
     InvalidStageKeyError,
@@ -109,7 +116,7 @@ class StageDecisionResponse(BaseModel):
 class StageControlResponse(BaseModel):
     project_id: str
     stage: str
-    action: Literal["REDO", "SKIP"]
+    action: Literal["REDO", "SKIP", "GENERATE"]
     status: str
 
 
@@ -118,6 +125,14 @@ class StageControlRequest(BaseModel):
 
     source_version_id: UUID | None = None
     reason: str | None = Field(default=None, max_length=500)
+
+
+class ErrorDetailResponse(BaseModel):
+    detail: str
+
+
+NOT_FOUND_RESPONSE = {"model": ErrorDetailResponse, "description": "Not found"}
+CONFLICT_RESPONSE = {"model": ErrorDetailResponse, "description": "Conflict"}
 
 
 class ProjectResponse(BaseModel):
@@ -150,6 +165,19 @@ class ProjectStateResponse(BaseModel):
     stage_runs: dict[str, StageRunStateResponse]
     versions: dict[str, StageVersionStateResponse]
     decisions: list[DecisionStateResponse]
+
+
+class ProposalExportManifestResponse(BaseModel):
+    project_id: str
+    project_name: str
+    proposal_version_id: str
+    proposal_stage_run_id: str
+    decision_id: str
+    title: str
+    narrative: str
+    sections: list[dict[str, Any]]
+    asset_refs: list[str]
+    generated_at: datetime
 
 
 @router.post("", response_model=ProjectCreateResponse, status_code=status.HTTP_201_CREATED)
@@ -191,7 +219,11 @@ async def list_projects_route(session: SessionDependency) -> list[ProjectRespons
     return [ProjectResponse.model_validate(project) for project in projects]
 
 
-@router.get("/{project_id}/state", response_model=ProjectStateResponse)
+@router.get(
+    "/{project_id}/state",
+    response_model=ProjectStateResponse,
+    responses={404: NOT_FOUND_RESPONSE},
+)
 async def get_project_state_route(
     project_id: str,
     session: SessionDependency,
@@ -249,8 +281,114 @@ async def get_project_state_route(
 
 
 @router.get(
+    "/{project_id}/exports/proposal-manifest",
+    response_model=ProposalExportManifestResponse,
+    responses={404: NOT_FOUND_RESPONSE, 409: CONFLICT_RESPONSE},
+)
+async def get_proposal_export_manifest_route(
+    project_id: str,
+    session: SessionDependency,
+) -> ProposalExportManifestResponse:
+    try:
+        manifest = await get_proposal_export_manifest(
+            session,
+            project_id=project_id,
+            workspace_id=get_settings().default_workspace_id,
+        )
+    except ProjectExportNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ProjectExportConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    return ProposalExportManifestResponse(
+        project_id=manifest.project_id,
+        project_name=manifest.project_name,
+        proposal_version_id=manifest.proposal_version_id,
+        proposal_stage_run_id=manifest.proposal_stage_run_id,
+        decision_id=manifest.decision_id,
+        title=manifest.title,
+        narrative=manifest.narrative,
+        sections=manifest.sections,
+        asset_refs=manifest.asset_refs,
+        generated_at=manifest.generated_at,
+    )
+
+
+@router.get(
+    "/{project_id}/exports/proposal.md",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"text/markdown": {"schema": {"type": "string"}}},
+            "description": "Markdown proposal export",
+        },
+        404: NOT_FOUND_RESPONSE,
+        409: CONFLICT_RESPONSE,
+    },
+)
+async def download_proposal_markdown_route(
+    project_id: str,
+    session: SessionDependency,
+) -> Response:
+    try:
+        manifest = await get_proposal_export_manifest(
+            session,
+            project_id=project_id,
+            workspace_id=get_settings().default_workspace_id,
+        )
+    except ProjectExportNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ProjectExportConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    return Response(
+        content=render_proposal_markdown(manifest),
+        media_type="text/markdown; charset=utf-8",
+        headers={
+            "Content-Disposition": f'attachment; filename="proposal-{project_id}.md"',
+        },
+    )
+
+
+@router.get(
+    "/{project_id}/exports/proposal.zip",
+    response_class=Response,
+    responses={
+        200: {
+            "content": {"application/zip": {"schema": {"type": "string", "format": "binary"}}},
+            "description": "ZIP proposal export bundle",
+        },
+        404: NOT_FOUND_RESPONSE,
+        409: CONFLICT_RESPONSE,
+    },
+)
+async def download_proposal_zip_route(
+    project_id: str,
+    session: SessionDependency,
+) -> Response:
+    try:
+        manifest = await get_proposal_export_manifest(
+            session,
+            project_id=project_id,
+            workspace_id=get_settings().default_workspace_id,
+        )
+    except ProjectExportNotFoundError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ProjectExportConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+
+    return Response(
+        content=render_proposal_zip(manifest),
+        media_type="application/zip",
+        headers={
+            "Content-Disposition": f'attachment; filename="proposal-{project_id}.zip"',
+        },
+    )
+
+
+@router.get(
     "/{project_id}/stages/{stage_key}/versions",
     response_model=list[StageVersionStateResponse],
+    responses={404: NOT_FOUND_RESPONSE},
 )
 async def list_stage_versions_route(
     project_id: str,
@@ -289,6 +427,7 @@ async def list_stage_versions_route(
     "/{project_id}/stages/{stage_key}/decisions",
     response_model=StageDecisionResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    responses={404: NOT_FOUND_RESPONSE, 409: CONFLICT_RESPONSE},
 )
 async def create_stage_decision_route(
     project_id: str,
@@ -343,6 +482,7 @@ async def create_stage_decision_route(
     "/{project_id}/stages/{stage_key}/redo",
     response_model=StageControlResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    responses={404: NOT_FOUND_RESPONSE, 409: CONFLICT_RESPONSE},
 )
 async def redo_stage_route(
     project_id: str,
@@ -363,6 +503,7 @@ async def redo_stage_route(
     "/{project_id}/stages/{stage_key}/skip",
     response_model=StageControlResponse,
     status_code=status.HTTP_202_ACCEPTED,
+    responses={404: NOT_FOUND_RESPONSE, 409: CONFLICT_RESPONSE},
 )
 async def skip_stage_route(
     project_id: str,
@@ -379,19 +520,42 @@ async def skip_stage_route(
     )
 
 
+@router.post(
+    "/{project_id}/stages/{stage_key}/generate",
+    response_model=StageControlResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={404: NOT_FOUND_RESPONSE, 409: CONFLICT_RESPONSE},
+)
+async def generate_stage_route(
+    project_id: str,
+    stage_key: str,
+    session: SessionDependency,
+    payload: StageControlRequest | None = None,
+) -> StageControlResponse:
+    return await _request_stage_control_route(
+        project_id=project_id,
+        stage_key=stage_key,
+        action="GENERATE",
+        session=session,
+        payload=payload,
+    )
+
+
 async def _request_stage_control_route(
     *,
     project_id: str,
     stage_key: str,
-    action: Literal["REDO", "SKIP"],
+    action: Literal["REDO", "SKIP", "GENERATE"],
     session: AsyncSession,
     payload: StageControlRequest | None,
 ) -> StageControlResponse:
     try:
+        settings = get_settings()
         result = await request_stage_control(
             session,
             project_id=project_id,
-            workspace_id=get_settings().default_workspace_id,
+            workspace_id=settings.default_workspace_id,
+            actor_id=settings.default_actor_id,
             stage_key=stage_key,
             action=action,
             source_version_id=str(payload.source_version_id)
@@ -408,11 +572,17 @@ async def _request_stage_control_route(
     except UnsupportedStageControlError as error:
         raise HTTPException(status_code=409, detail=str(error)) from error
 
+    if result.outbox_event is not None:
+        from apps.api.app.tasks import execute_agent_stage
+
+        execute_agent_stage.delay(result.outbox_event.payload_json["stage_run_id"])
+        await mark_outbox_published(session, event_id=result.outbox_event.id)
+
     return StageControlResponse(
         project_id=result.project_id,
         stage=result.stage,
         action=action,
-        status="QUEUED",
+        status=result.status,
     )
 
 
