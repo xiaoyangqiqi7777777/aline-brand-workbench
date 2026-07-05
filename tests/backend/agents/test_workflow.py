@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from uuid import NAMESPACE_URL, uuid5
 
+import pytest
 from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.types import Command
 
@@ -9,7 +10,11 @@ from backend.agents.schemas.brand_spec import BrandSpec
 from backend.agents.schemas.directions import DirectionOutput
 from backend.agents.schemas.intake import IntakeOutput
 from backend.agents.schemas.ip import IPOutput
+from backend.agents.schemas.logo import LogoOutput
+from backend.agents.schemas.materials import MaterialOutput
 from backend.agents.schemas.proposal import ProposalOutput, ProposalSectionType
+from backend.agents.schemas.review import ReviewOutput
+from backend.agents.schemas.vi import VIOutput
 from backend.agents.testing import InMemoryArtifactWriter, InMemoryInvocationRecorder
 from backend.agents.workflow import build_brand_workflow
 from backend.providers.models.fake import FakeImageModelProvider, FakeTextModelProvider
@@ -305,3 +310,542 @@ def test_graph_can_resume_after_worker_rebuild() -> None:
     assert resumed["__interrupt__"][0].value["kind"] == "logo_decision"
     assert resumed["selected_direction_id"] == "direction-clear"
     assert any(record.capability.value == "LOGO" for record in invocation_recorder.records)
+
+
+def test_logo_selection_resumes_after_worker_rebuild_and_reaches_vi_decision() -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config("thread-logo-to-vi-restart")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": "project-logo-to-vi-restart",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    waiting_for_logo = _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("restart-directions-for-vi")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    logo_output = LogoOutput.model_validate(waiting_for_logo["logo_output"])
+    selected_logo = next(
+        concept for concept in logo_output.concepts if concept.id == "logo-wordmark"
+    )
+    assert waiting_for_logo["__interrupt__"][0].value["kind"] == "logo_decision"
+
+    rebuilt_worker = build()
+    waiting_for_vi = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version("restart-logo")),
+            "selected_item_id": selected_logo.id,
+        },
+    )
+    vi_output = VIOutput.model_validate(waiting_for_vi["vi_output"])
+
+    assert waiting_for_vi["__interrupt__"][0].value["kind"] == "vi_decision"
+    assert waiting_for_vi["selected_logo_id"] == selected_logo.id
+    assert waiting_for_vi["selected_version_ids"]["LOGO"] == str(_version("restart-logo"))
+    assert vi_output.source_logo_asset_id == selected_logo.preview_asset_id
+    assert sum(record.capability.value == "VI" for record in invocation_recorder.records) == 1
+
+
+@pytest.mark.parametrize(
+    ("action", "expected_interrupt", "expects_ip"),
+    [
+        ("GENERATE", "ip_decision", True),
+        ("SKIP", "material_decision", False),
+    ],
+)
+def test_vi_confirmation_and_ip_choice_resume_after_worker_rebuild(
+    action: str,
+    expected_interrupt: str,
+    expects_ip: bool,
+) -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config(f"thread-vi-ip-{action.lower()}")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": f"project-vi-ip-{action.lower()}",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"vi-ip-directions-{action}")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    waiting_for_vi = _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"vi-ip-logo-{action}")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    assert waiting_for_vi["__interrupt__"][0].value["kind"] == "vi_decision"
+
+    confirmation_worker = build()
+    waiting_for_ip_choice = _resume(
+        confirmation_worker,
+        config,
+        {
+            "version_id": str(_version(f"vi-ip-vi-{action}")),
+            "confirmed": True,
+        },
+    )
+    assert waiting_for_ip_choice["__interrupt__"][0].value["kind"] == "ip_choice"
+    assert waiting_for_ip_choice["selected_version_ids"]["VI"] == str(
+        _version(f"vi-ip-vi-{action}")
+    )
+
+    choice_worker = build()
+    resumed = _resume(choice_worker, config, {"action": action})
+    ip_invocations = [
+        record for record in invocation_recorder.records if record.capability.value == "IP"
+    ]
+
+    assert resumed["__interrupt__"][0].value["kind"] == expected_interrupt
+    assert resumed["ip_skipped"] is (not expects_ip)
+    assert len(ip_invocations) == (2 if expects_ip else 0)
+    assert sum(record.image_count for record in ip_invocations) == (1 if expects_ip else 0)
+    if expects_ip:
+        IPOutput.model_validate(resumed["ip_output"])
+    else:
+        assert "ip_output" not in resumed
+        material_output = MaterialOutput.model_validate(resumed["material_output"])
+        vi_output = VIOutput.model_validate(waiting_for_ip_choice["vi_output"])
+        assert all(
+            scene.used_asset_ids == [vi_output.source_logo_asset_id]
+            for scene in material_output.scenes
+        )
+
+
+def test_ip_confirmation_resumes_after_worker_rebuild_and_generates_materials() -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config("thread-ip-to-materials-restart")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": "project-ip-to-materials-restart",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("ip-materials-directions")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("ip-materials-logo")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("ip-materials-vi")),
+            "confirmed": True,
+        },
+    )
+    waiting_for_ip = _resume(first_worker, config, {"action": "GENERATE"})
+    assert waiting_for_ip["__interrupt__"][0].value["kind"] == "ip_decision"
+    vi_output = VIOutput.model_validate(waiting_for_ip["vi_output"])
+    ip_output = IPOutput.model_validate(waiting_for_ip["ip_output"])
+
+    rebuilt_worker = build()
+    waiting_for_materials = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version("ip-materials-ip")),
+            "confirmed": True,
+        },
+    )
+    material_output = MaterialOutput.model_validate(waiting_for_materials["material_output"])
+    material_invocations = [
+        record for record in invocation_recorder.records if record.capability.value == "MATERIALS"
+    ]
+    expected_references = {
+        vi_output.source_logo_asset_id,
+        ip_output.preview_asset_id,
+    }
+
+    assert waiting_for_materials["__interrupt__"][0].value["kind"] == "material_decision"
+    assert waiting_for_materials["selected_version_ids"]["IP"] == str(_version("ip-materials-ip"))
+    assert len(material_output.scenes) == 2
+    assert all(set(scene.used_asset_ids) == expected_references for scene in material_output.scenes)
+    assert len(material_invocations) == 3
+    assert sum(record.image_count for record in material_invocations) == 2
+
+
+def test_material_confirmation_resumes_after_worker_rebuild_and_generates_review() -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config("thread-materials-to-review-restart")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": "project-materials-to-review-restart",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("materials-review-directions")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("materials-review-logo")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("materials-review-vi")),
+            "confirmed": True,
+        },
+    )
+    waiting_for_materials = _resume(first_worker, config, {"action": "SKIP"})
+    assert waiting_for_materials["__interrupt__"][0].value["kind"] == "material_decision"
+    material_output = MaterialOutput.model_validate(waiting_for_materials["material_output"])
+
+    rebuilt_worker = build()
+    waiting_for_review = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version("materials-review-materials")),
+            "confirmed": True,
+        },
+    )
+    review_output = ReviewOutput.model_validate(waiting_for_review["review_output"])
+    review_invocations = [
+        record for record in invocation_recorder.records if record.capability.value == "REVIEW"
+    ]
+
+    assert waiting_for_review["__interrupt__"][0].value["kind"] == "review_decision"
+    assert waiting_for_review["selected_version_ids"]["MATERIALS"] == str(
+        _version("materials-review-materials")
+    )
+    assert waiting_for_review["review_output"]["pass"] is True
+    assert "passed" not in waiting_for_review["review_output"]
+    assert review_output.passed is True
+    assert review_output.issues == []
+    assert len(review_invocations) == 1
+    assert review_invocations[0].image_count == 0
+    assert len({scene.preview_asset_id for scene in material_output.scenes}) == 2
+
+
+def test_review_decision_resumes_after_worker_rebuild_and_generates_proposal() -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    config = _config("thread-review-to-proposal-restart")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": "project-review-to-proposal-restart",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-directions")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-logo")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-vi")),
+            "confirmed": True,
+        },
+    )
+    waiting_for_materials = _resume(first_worker, config, {"action": "SKIP"})
+    waiting_for_review = _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-materials")),
+            "confirmed": True,
+        },
+    )
+    assert waiting_for_review["__interrupt__"][0].value["kind"] == "review_decision"
+    direction_output = DirectionOutput.model_validate(waiting_for_review["direction_output"])
+    logo_output = LogoOutput.model_validate(waiting_for_review["logo_output"])
+    material_output = MaterialOutput.model_validate(waiting_for_materials["material_output"])
+    selected_direction = next(
+        item for item in direction_output.directions if item.id == "direction-clear"
+    )
+    selected_logo = next(item for item in logo_output.concepts if item.id == "logo-wordmark")
+    artifact_count_before_proposal = len(artifact_writer.items)
+
+    rebuilt_worker = build()
+    waiting_for_proposal = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version("review-proposal-review")),
+            "proceed": True,
+            "accepted_issue_ids": [],
+        },
+    )
+    proposal = ProposalOutput.model_validate(waiting_for_proposal["proposal_output"])
+    proposal_invocations = [
+        record for record in invocation_recorder.records if record.capability.value == "PROPOSAL"
+    ]
+    sections = {section.type: section for section in proposal.sections}
+    expected_asset_refs = {
+        selected_direction.preview_asset_id,
+        selected_logo.preview_asset_id,
+        *(scene.preview_asset_id for scene in material_output.scenes),
+    }
+
+    assert waiting_for_proposal["__interrupt__"][0].value["kind"] == "proposal_decision"
+    assert waiting_for_proposal["selected_version_ids"]["REVIEW"] == str(
+        _version("review-proposal-review")
+    )
+    assert [section.type for section in proposal.sections] == [
+        ProposalSectionType.BRIEF,
+        ProposalSectionType.DIRECTION,
+        ProposalSectionType.LOGO,
+        ProposalSectionType.VI,
+        ProposalSectionType.MATERIALS,
+        ProposalSectionType.REVIEW_SUMMARY,
+    ]
+    assert sections[ProposalSectionType.BRIEF].version_id == _version("review-proposal-directions")
+    assert sections[ProposalSectionType.DIRECTION].version_id == _version(
+        "review-proposal-directions"
+    )
+    assert sections[ProposalSectionType.LOGO].version_id == _version("review-proposal-logo")
+    assert sections[ProposalSectionType.VI].version_id == _version("review-proposal-vi")
+    assert sections[ProposalSectionType.MATERIALS].version_id == _version(
+        "review-proposal-materials"
+    )
+    assert sections[ProposalSectionType.REVIEW_SUMMARY].version_id == _version(
+        "review-proposal-review"
+    )
+    assert set(proposal.asset_refs) == expected_asset_refs
+    assert ProposalSectionType.IP not in sections
+    assert len(proposal_invocations) == 1
+    assert proposal_invocations[0].image_count == 0
+    assert len(artifact_writer.items) == artifact_count_before_proposal
+
+
+@pytest.mark.parametrize("ip_action", ["GENERATE", "SKIP"])
+def test_proposal_confirmation_reaches_export_ready_after_worker_rebuild(
+    ip_action: str,
+) -> None:
+    checkpointer = InMemorySaver()
+    artifact_writer = InMemoryArtifactWriter()
+    invocation_recorder = InMemoryInvocationRecorder()
+
+    def build():
+        return build_brand_workflow(
+            text_provider=FakeTextModelProvider(),
+            image_provider=FakeImageModelProvider(),
+            artifact_writer=artifact_writer,
+            invocation_recorder=invocation_recorder,
+            checkpointer=checkpointer,
+        )
+
+    suffix = ip_action.lower()
+    config = _config(f"thread-proposal-export-{suffix}")
+    first_worker = build()
+    first_worker.invoke(
+        {
+            "project_id": f"project-proposal-export-{suffix}",
+            "brand_spec": _complete_spec().model_dump(mode="json"),
+            "status": "INTAKE",
+        },
+        config=config,
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-directions-{suffix}")),
+            "selected_item_id": "direction-clear",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-logo-{suffix}")),
+            "selected_item_id": "logo-wordmark",
+        },
+    )
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-vi-{suffix}")),
+            "confirmed": True,
+        },
+    )
+    waiting_after_ip_choice = _resume(first_worker, config, {"action": ip_action})
+    if ip_action == "GENERATE":
+        waiting_for_materials = _resume(
+            first_worker,
+            config,
+            {
+                "version_id": str(_version("proposal-export-ip-generate")),
+                "confirmed": True,
+            },
+        )
+    else:
+        waiting_for_materials = waiting_after_ip_choice
+    assert waiting_for_materials["__interrupt__"][0].value["kind"] == "material_decision"
+    _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-materials-{suffix}")),
+            "confirmed": True,
+        },
+    )
+    waiting_for_proposal = _resume(
+        first_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-review-{suffix}")),
+            "proceed": True,
+            "accepted_issue_ids": [],
+        },
+    )
+    assert waiting_for_proposal["__interrupt__"][0].value["kind"] == "proposal_decision"
+    ProposalOutput.model_validate(waiting_for_proposal["proposal_output"])
+    invocation_count_before_confirmation = len(invocation_recorder.records)
+    artifact_count_before_confirmation = len(artifact_writer.items)
+
+    rebuilt_worker = build()
+    completed = _resume(
+        rebuilt_worker,
+        config,
+        {
+            "version_id": str(_version(f"proposal-export-proposal-{suffix}")),
+            "confirmed": True,
+        },
+    )
+    expected_versions = {
+        "DIRECTIONS",
+        "LOGO",
+        "VI",
+        "MATERIALS",
+        "REVIEW",
+        "PROPOSAL",
+    }
+    if ip_action == "GENERATE":
+        expected_versions.add("IP")
+
+    assert completed["status"] == "EXPORT_READY"
+    assert completed["selected_version_ids"]["PROPOSAL"] == str(
+        _version(f"proposal-export-proposal-{suffix}")
+    )
+    assert set(completed["selected_version_ids"]) == expected_versions
+    assert not completed.get("__interrupt__")
+    assert len(invocation_recorder.records) == invocation_count_before_confirmation
+    assert len(artifact_writer.items) == artifact_count_before_confirmation
