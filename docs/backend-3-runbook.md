@@ -140,9 +140,27 @@ Supported formats:
 - `pptx`
 - `zip`
 
+Current `main` already lets the agent workflow reach `status = EXPORT_READY` after Proposal
+confirmation. The Backend 2 finalization handoff expects Backend 1 to create a durable Export
+orchestration run, then call Backend 3 for file generation.
+
+Expected handoff into Backend 3:
+
+1. Backend 1 validates the confirmed Proposal version, confirmed upstream version chain, and
+   artifact readability.
+2. Backend 1 creates an export orchestration record/run with an idempotency key based on the
+   Proposal version.
+3. Backend 1 builds an `ExportRequest` from PostgreSQL stage versions and selected artifact refs.
+4. Backend 1 calls `ExportArtifactService.render_and_store()` once per required format.
+5. Backend 1 persists each returned export artifact independently.
+
+Each export format must have its own status and retry path. PDF, PPTX, and ZIP failures should not
+fail or retry the other formats together.
+
 Backend 1 still needs to define:
 
 - `POST /exports` request fields
+- Export orchestration run/table shape after `EXPORT_READY`
 - Export task table or persistence model
 - Export status query shape
 - Artifact lookup flow
@@ -236,7 +254,9 @@ hydrate those URLs in the workbench response or expose a separate artifact URL e
 
 Required export contract decisions:
 - POST /exports body
+- Export orchestration run/table shape after EXPORT_READY
 - export status query
 - export task persistence model
 - artifact lookup flow
+- per-format retry/idempotency keys for PDF, PPTX, and ZIP
 ```
