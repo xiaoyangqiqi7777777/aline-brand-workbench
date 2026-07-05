@@ -17,7 +17,13 @@ from sqlalchemy.pool import NullPool
 
 from apps.api.app.main import app
 from backend.application.projects import CreateProjectCommand, create_project
-from backend.infrastructure.database.models import Base, OutboxEvent, StageRun, StageVersion
+from backend.infrastructure.database.models import (
+    Base,
+    OutboxEvent,
+    Project,
+    StageRun,
+    StageVersion,
+)
 from backend.infrastructure.database.session import get_db_session
 
 
@@ -180,6 +186,19 @@ async def mark_stage_version_stale(
         version = await session.get(StageVersion, version_id)
         assert version is not None
         version.status = "STALE"
+        await session.commit()
+
+
+async def mark_project_completed(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    project_id: str,
+) -> None:
+    async with session_factory() as session:
+        project = await session.get(Project, project_id)
+        assert project is not None
+        project.current_stage = "PROPOSAL"
+        project.status = "COMPLETED"
         await session.commit()
 
 
@@ -1125,6 +1144,63 @@ def test_get_proposal_export_manifest_requires_completed_project(api_client) -> 
 
     assert response.status_code == 409
     assert response.json() == {"detail": "Project is not completed"}
+
+
+def test_get_proposal_export_manifest_rejects_stale_completed_proposal(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    proposal_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", lambda _: None)
+
+    completion_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/proposal/decisions",
+        json={
+            "version_id": proposal_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    asyncio.run(mark_stage_version_stale(session_factory, version_id=proposal_version_id))
+
+    response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/exports/proposal-manifest",
+    )
+
+    assert completion_response.status_code == 202
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Completed project has no Proposal version"}
+
+
+def test_get_proposal_export_manifest_requires_final_confirmation(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+    asyncio.run(mark_project_completed(session_factory, project_id=seeded.project_id))
+
+    response = client.get(
+        f"/api/v1/projects/{seeded.project_id}/exports/proposal-manifest",
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Completed project has no Proposal confirmation"}
 
 
 def test_confirm_stage_decision_foreign_version_returns_404(api_client) -> None:
