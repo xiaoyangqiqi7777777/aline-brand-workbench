@@ -986,6 +986,61 @@ def test_confirm_proposal_stage_decision_completes_project_and_is_idempotent(
     assert state_payload["versions"]["PROPOSAL"]["id"] == proposal_version_id
 
 
+def test_completed_project_rejects_non_final_stage_decisions(
+    api_client,
+    monkeypatch,
+) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    materials_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="MATERIALS",
+        ),
+    )
+    proposal_version_id = asyncio.run(
+        seed_stage_version(
+            session_factory,
+            project_id=seeded.project_id,
+            stage="PROPOSAL",
+        ),
+    )
+    dispatched_stage_run_ids: list[str] = []
+
+    from apps.api.app import tasks
+
+    monkeypatch.setattr(tasks.execute_agent_stage, "delay", dispatched_stage_run_ids.append)
+
+    completion_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/proposal/decisions",
+        json={
+            "version_id": proposal_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    materials_response = client.post(
+        f"/api/v1/projects/{seeded.project_id}/stages/materials/decisions",
+        json={
+            "version_id": materials_version_id,
+            "action": "CONFIRM_VERSION",
+            "confirmed": True,
+        },
+    )
+    state_response = client.get(f"/api/v1/projects/{seeded.project_id}/state")
+
+    assert completion_response.status_code == 202
+    assert materials_response.status_code == 409
+    assert materials_response.json() == {
+        "detail": "Completed project cannot accept stage decisions",
+    }
+    assert dispatched_stage_run_ids == []
+    state_payload = state_response.json()
+    assert state_payload["project"]["status"] == "COMPLETED"
+    assert state_payload["current_stage"] == "PROPOSAL"
+
+
 def test_get_proposal_export_manifest_returns_completed_project_manifest(
     api_client,
     monkeypatch,

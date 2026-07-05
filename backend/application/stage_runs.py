@@ -89,10 +89,10 @@ async def create_stage_decision(
     if stage not in KNOWN_PROJECT_STAGES:
         raise InvalidStageDecisionError(f"Invalid stage key: {stage_key}")
 
-    found_project_id = await session.scalar(
-        select(Project.id).where(Project.id == project_id, Project.workspace_id == workspace_id)
+    project = await session.scalar(
+        select(Project).where(Project.id == project_id, Project.workspace_id == workspace_id)
     )
-    if found_project_id is None:
+    if project is None:
         raise StageDecisionNotFoundError("Project not found")
 
     source_version = await session.get(StageVersion, version_id)
@@ -104,6 +104,8 @@ async def create_stage_decision(
         raise StageDecisionConflictError("Stage version does not belong to requested stage")
     if source_version.status != "GENERATED":
         raise StageDecisionConflictError("Only a generated Stage version can be decided")
+    if project.status == "COMPLETED" and not (stage == "PROPOSAL" and action == "CONFIRM_VERSION"):
+        raise StageDecisionConflictError("Completed project cannot accept stage decisions")
 
     if stage == "DIRECTIONS":
         if action != "SELECT_VERSION":

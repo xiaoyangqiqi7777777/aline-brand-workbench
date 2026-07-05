@@ -285,7 +285,7 @@ Proposal 确认成功时响应结构相同，其中 `decision.stage` 为 `PROPOS
 
 - `404`：项目不存在，或版本不存在/不属于该项目。
 - `422`：stage key 非法、action 非法，或 action 所需字段缺失。
-- `409`：版本阶段与路径阶段不一致、版本已是 `STALE`、选择项不存在、重复选择冲突，或当前 milestone 暂不支持该 stage。
+- `409`：版本阶段与路径阶段不一致、版本已是 `STALE`、项目已完成但请求不是最终 Proposal 确认、选择项不存在、重复选择冲突，或当前 milestone 暂不支持该 stage。
 
 当前限制：
 
