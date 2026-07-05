@@ -269,6 +269,8 @@ async def create_direction_selection_run(
         or source_version.stage != "DIRECTIONS"
     ):
         raise StageDecisionNotFoundError("Directions version not found")
+    if source_version.status != "GENERATED":
+        raise StageDecisionConflictError("Only a generated Stage version can be decided")
     direction_output = DirectionOutput.model_validate(source_version.output_json)
     if direction_id not in {item.id for item in direction_output.directions}:
         raise StageDecisionConflictError("Selected direction does not exist in current version")
@@ -680,6 +682,11 @@ async def create_intake_resume_run(
         raise StageResumeConflictError("Only a succeeded Intake run can accept answers")
     if source_run.result_version_id is None:
         raise StageResumeConflictError("Intake run has no result to resume")
+    source_version = await session.get(StageVersion, source_run.result_version_id)
+    if source_version is None or source_version.project_id != source_run.project_id:
+        raise StageResumeNotFoundError("Intake version not found")
+    if source_version.status != "GENERATED":
+        raise StageResumeConflictError("Only a generated Intake version can accept answers")
 
     payload_json = resume_payload.model_dump(mode="json")
     digest = hashlib.sha256(

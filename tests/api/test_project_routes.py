@@ -171,6 +171,18 @@ async def seed_logo_version(
     return await seed_stage_version(session_factory, project_id=project_id, stage="LOGO")
 
 
+async def mark_stage_version_stale(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    version_id: str,
+) -> None:
+    async with session_factory() as session:
+        version = await session.get(StageVersion, version_id)
+        assert version is not None
+        version.status = "STALE"
+        await session.commit()
+
+
 async def seed_ip_choice_project(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> SeededIpChoiceProject:
@@ -1601,6 +1613,27 @@ def test_intake_answers_conflicting_stage_run_returns_409(api_client) -> None:
     assert response.json() == {"detail": "Only a succeeded Intake run can accept answers"}
 
 
+def test_intake_answers_stale_intake_version_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_succeeded_intake_project(session_factory))
+    asyncio.run(mark_stage_version_stale(session_factory, version_id=seeded.intake_version_id))
+
+    response = client.post(
+        f"/api/v1/stage-runs/{seeded.intake_run_id}/intake-answers",
+        json={
+            "answers": [
+                {
+                    "field_path": "industry",
+                    "value": "茶饮",
+                }
+            ]
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Only a generated Intake version can accept answers"}
+
+
 def test_legacy_direction_selection_dispatches_logo_run(api_client, monkeypatch) -> None:
     client, session_factory = api_client
     seeded = asyncio.run(seed_directions_project(session_factory))
@@ -1641,6 +1674,23 @@ def test_legacy_direction_selection_missing_stage_run_returns_404(api_client) ->
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Stage run not found"}
+
+
+def test_legacy_direction_selection_stale_version_returns_409(api_client) -> None:
+    client, session_factory = api_client
+    seeded = asyncio.run(seed_directions_project(session_factory))
+    asyncio.run(mark_stage_version_stale(session_factory, version_id=seeded.directions_version_id))
+
+    response = client.post(
+        f"/api/v1/stage-runs/{seeded.directions_run_id}/direction-selection",
+        json={
+            "version_id": seeded.directions_version_id,
+            "direction_id": seeded.direction_ids[0],
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json() == {"detail": "Only a generated Stage version can be decided"}
 
 
 def test_legacy_direction_selection_conflicting_selection_returns_409(

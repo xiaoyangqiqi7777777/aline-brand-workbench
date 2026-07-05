@@ -477,7 +477,7 @@ Content-Disposition: attachment; filename="proposal-{project_id}.zip"
 错误语义：
 
 - `404`：StageRun 不存在或不属于当前 workspace。
-- `409`：StageRun 不是已成功的 `INTAKE`，或 Intake 没有可 resume 的结果。
+- `409`：StageRun 不是已成功的 `INTAKE`、Intake 没有可 resume 的结果，或 Intake 版本已是 `STALE`。
 
 ### POST `/api/v1/stage-runs/{stage_run_id}/direction-selection`
 
@@ -490,7 +490,7 @@ POST /api/v1/projects/{project_id}/stages/directions/decisions
 旧入口错误语义：
 
 - `404`：StageRun 不存在或不属于当前 workspace。
-- `409`：StageRun 状态不允许选择、版本不匹配、选择项不存在或重复选择冲突。
+- `409`：StageRun 状态不允许选择、版本不匹配、Directions version 已是 `STALE`、选择项不存在或重复选择冲突。
 
 ### GET `/api/v1/stage-runs/{stage_run_id}`
 
